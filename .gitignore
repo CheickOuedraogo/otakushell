@@ -1,0 +1,30 @@
+# Build
+build/
+*.o
+*.a
+*.so
+*.out
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+build.ninja
+.deps/
+
+# Editors
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.kate-swp
+
+# OS
+.DS_Store
+
+# otakuShell local
+config.local.toml
+*.sock

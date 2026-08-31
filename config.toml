@@ -1,0 +1,66 @@
+# otakuShell — configuration utilisateur
+# Chaque frame est une surface Wayland; chaque frame déclare un layout de modules.
+# Les frames/modules non déclarés ici ne sont jamais instanciés.
+
+[shell]
+monitor = "auto"          # "auto" = tous les moniteurs, ou un nom de connecteur (ex: "eDP-1")
+height = 34               # hauteur des barres en pixels
+font = "Sans 11"
+theme = "dark"
+
+[theme.colors]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+accent = "#89b4fa"
+muted = "#6c7086"
+
+# ---------------------------------------------------------------
+# Barre principale du haut — style Celestia
+# ---------------------------------------------------------------
+[[frame]]
+id = "navbar-top"
+anchor = "top"
+exclusive_zone = true
+order = ["workspace", "clock", "sysinfo", "audio", "wifi", "bluetooth"]
+
+# ---------------------------------------------------------------
+# Dashboard edge droit — apparaît au survol du bord droit (volume, luminosité)
+# ---------------------------------------------------------------
+[[frame]]
+id = "edge-right"
+anchor = "right"
+hidden = "auto"           # auto-show au survol du bord droit
+order = ["brightness", "audio", "sysinfo"]
+
+# ---------------------------------------------------------------
+# Barre du bas — dock d'apps épinglées
+# ---------------------------------------------------------------
+[[frame]]
+id = "navbar-bottom"
+anchor = "bottom"
+order = ["app-dock", "systray", "clock"]
+
+# ---------------------------------------------------------------
+# Lockscreen
+# ---------------------------------------------------------------
+[[frame]]
+id = "lockscreen"
+anchor = "full"
+lock = true
+order = ["clock", "sysinfo"]
+
+# ---------------------------------------------------------------
+# Modules — options par module
+# ---------------------------------------------------------------
+[modules.clock]
+format = "%H:%M"
+date_format = "%a %d %b"
+
+[modules.sysinfo]
+interval_ms = 2000
+
+[modules.workspace]
+hypr_socket = "auto"
+
+[modules.app-dock]
+pinned = ["firefox", "kitty", "code"]
