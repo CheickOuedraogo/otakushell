@@ -1,6 +1,7 @@
 #include "otaku/wayland.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -133,8 +134,8 @@ struct ShmSurface {
 // ---------------------------------------------------------------------------
 class LayerSurface final : public ISurface {
 public:
-    LayerSurface(Display& d, Output* output, std::string ns, uint32_t anchor,
-                 int32_t height, bool exclusive)
+    LayerSurface(Display& d, Output* output, std::string ns, Anchor anchor,
+                 int32_t bar_size, bool exclusive)
         : display_(d), namespace_(std::move(ns)), anchor_(anchor) {
         shm_.compositor = d.compositor;
         shm_.shm = d.shm;
@@ -148,16 +149,30 @@ public:
             d.layer_shell, wl_surface_, out,
             ZWLR_LAYER_SHELL_V1_LAYER_TOP, namespace_.c_str());
 
-        const uint32_t anchors = anchor;  // ZWLR_LAYER_SURFACE_V1_ANCHOR_*
-        if (anchors & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP ||
-            anchors & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM) {
-            zwlr_layer_surface_v1_set_size(layer_, 0, static_cast<uint32_t>(height));
-        } else {
-            zwlr_layer_surface_v1_set_size(layer_, static_cast<uint32_t>(height), 0);
+        const uint32_t TOP = 1, BOTTOM = 2, LEFT = 4, RIGHT = 8;
+        const bool horizontal = (anchor == Anchor::Top || anchor == Anchor::Bottom);
+        // A bar with size 0 on its axis is stretched by the compositor, which
+        // requires the complementary anchors along that axis to be present.
+        uint32_t flags = 0;
+        switch (anchor) {
+            case Anchor::Top:    flags = TOP | LEFT | RIGHT; break;
+            case Anchor::Bottom: flags = BOTTOM | LEFT | RIGHT; break;
+            case Anchor::Left:   flags = LEFT | TOP | BOTTOM; break;
+            case Anchor::Right:  flags = RIGHT | TOP | BOTTOM; break;
+            case Anchor::Full:
+            case Anchor::None:
+                flags = (LEFT | RIGHT | TOP | BOTTOM);
+                break;
         }
-        zwlr_layer_surface_v1_set_anchor(layer_, anchors);
+
+        if (horizontal) {
+            zwlr_layer_surface_v1_set_size(layer_, 0, static_cast<uint32_t>(bar_size));
+        } else {
+            zwlr_layer_surface_v1_set_size(layer_, static_cast<uint32_t>(bar_size), 0);
+        }
+        zwlr_layer_surface_v1_set_anchor(layer_, flags);
         if (exclusive)
-            zwlr_layer_surface_v1_set_exclusive_zone(layer_, height);
+            zwlr_layer_surface_v1_set_exclusive_zone(layer_, bar_size);
         zwlr_layer_surface_v1_set_keyboard_interactivity(
             layer_, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
 
@@ -166,7 +181,7 @@ public:
     }
 
     ~LayerSurface() override {
-        if (layer_) zwlr_layer_surface_v1_destroy(layer_);
+        if (display_.alive && layer_) zwlr_layer_surface_v1_destroy(layer_);
         shm_.destroy();
     }
 
@@ -211,7 +226,7 @@ private:
 
     Display& display_;
     std::string namespace_;
-    uint32_t anchor_{0};
+    Anchor anchor_{Anchor::None};
     zwlr_layer_surface_v1* layer_{nullptr};
     wl_surface* wl_surface_{nullptr};
     ShmSurface shm_{};
@@ -236,10 +251,13 @@ bool display_connect(Display& d, std::vector<Output>* outputs, std::string& err)
     RegistryCtx ctx{&d, outputs ? outputs : &collected};
     wl_registry_add_listener(d.registry, &registry_listener, &ctx);
     wl_display_roundtrip(d.display);
-    if (!d.compositor || !d.shm) {
-        err = "compositor does not support required globals";
-        return false;
-    }
+    if (!d.compositor || !d.shm)
+        err = "compositor does not support wl_compositor/wl_shm";
+    else if (!d.layer_shell)
+        err = "compositor does not expose wlr-layer-shell (not Hyprland/wlroots?)";
+    else if (!d.xdg_base)
+        err = "compositor does not expose xdg-shell";
+    if (!err.empty()) return false;
     return true;
 }
 
@@ -248,21 +266,56 @@ bool display_poll(Display& d) {
     int ret = wl_display_dispatch_pending(d.display);
     if (ret < 0) {
         wl_display_flush(d.display);
-        wl_display_dispatch(d.display);
+        ret = wl_display_dispatch(d.display);
     }
-    return wl_display_flush(d.display) >= 0;
+    if (ret < 0) d.alive = false;
+    return d.alive;
+}
+
+bool display_wait(Display& d, int timeout_ms) {
+    if (!d.display) return false;
+
+    struct pollfd pfd;
+    pfd.fd = wl_display_get_fd(d.display);
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+
+    // Dispatch anything already queued first.
+    if (wl_display_prepare_read(d.display) != 0) {
+        wl_display_dispatch_pending(d.display);
+        return true;
+    }
+    wl_display_flush(d.display);
+
+    int pr = poll(&pfd, 1, timeout_ms);
+    if (pr < 0) {
+        d.alive = false;
+        wl_display_cancel_read(d.display);
+        return false;
+    }
+    if (pr == 0) {
+        wl_display_cancel_read(d.display);
+        return true;  // timeout elapsed
+    }
+    if (wl_display_read_events(d.display) < 0) {
+        d.alive = false;
+        return false;
+    }
+    wl_display_dispatch_pending(d.display);
+    return d.alive;
 }
 
 void display_disconnect(Display& d) {
     if (d.display) wl_display_disconnect(d.display);
-    d = Display{};
+    d.alive = false;
+    d.display = nullptr;
 }
 
 std::unique_ptr<ISurface> create_layer_surface(Display& d, Output* output,
-                                               std::string ns, uint32_t anchor,
-                                               int32_t height, bool exclusive) {
+                                               std::string ns, Anchor anchor,
+                                               int32_t bar_size, bool exclusive) {
     return std::make_unique<LayerSurface>(d, output, std::move(ns), anchor,
-                                          height, exclusive);
+                                          bar_size, exclusive);
 }
 
 std::unique_ptr<ISurface> create_toplevel_surface(Display&, std::string) {

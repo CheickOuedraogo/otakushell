@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+#include <execinfo.h>
+#include <unistd.h>
+
 #include "otaku/config.hpp"
 #include "otaku/frame.hpp"
 #include "otaku/hypr.hpp"
@@ -18,17 +21,14 @@ namespace {
 volatile std::sig_atomic_t g_running = 1;
 void on_signal(int) { g_running = 0; }
 
-// Map our Anchor to wlr-layer-shell anchor flags.
-uint32_t anchor_flags(Anchor a) {
-    switch (a) {
-        case Anchor::Top: return 1 /*TOP*/;
-        case Anchor::Bottom: return 2 /*BOTTOM*/;
-        case Anchor::Left: return 4 /*LEFT*/;
-        case Anchor::Right: return 8 /*RIGHT*/;
-        case Anchor::Full: return 0;
-        case Anchor::None: return 0;
-    }
-    return 0;
+void on_fatal(int sig) {
+    std::fprintf(stderr, "\notakud: fatal signal %d (SIG%s), pid %d\n", sig,
+                 (sig == SIGSEGV) ? "SEGV" : (sig == SIGABRT) ? "ABRT" : "?",
+                 static_cast<int>(getpid()));
+    void* frames[32];
+    int n = backtrace(frames, 32);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    _exit(128 + sig);
 }
 
 }  // namespace
@@ -69,18 +69,23 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+    std::signal(SIGSEGV, on_fatal);
+    std::signal(SIGABRT, on_fatal);
+    std::printf("otakud: starting, pid %d\n", static_cast<int>(getpid()));
 
     // Build one Frame per configured frame, backed by a layer surface.
     // Step 1 only handles anchored bars (top/bottom/left/right); the
     // fullscreen lockscreen frame arrives in a later step.
     std::vector<std::unique_ptr<Frame>> frames;
     for (const auto& fspec : cfg.frames) {
-        uint32_t flags = anchor_flags(fspec.anchor);
-        if (flags == 0) continue;  // unanchored/full frames deferred
+        // Step 1 only handles anchored bars (top/bottom/left/right); the
+        // fullscreen lockscreen frame arrives in a later step.
+        if (fspec.anchor == Anchor::None || fspec.anchor == Anchor::Full) continue;
 
         const auto make_frame = [&](Output* out) {
-            auto surf = create_layer_surface(d, out, "otaku-" + fspec.id, flags,
-                                             cfg.height, fspec.exclusive);
+            auto surf = create_layer_surface(d, out, "otaku-" + fspec.id,
+                                             fspec.anchor, cfg.height,
+                                             fspec.exclusive);
             auto f = std::make_unique<Frame>(fspec);
             f->set_surface(std::move(surf));
             frames.push_back(std::move(f));
@@ -102,8 +107,10 @@ int main(int argc, char** argv) {
     for (auto& f : frames) f->render();
     wl_display_flush(d.display);
 
-    while (g_running && display_poll(d)) {
-        // Event loop: keeps surfaces alive and processes input.
+    // Event loop. display_wait sleeps (no busy-loop) until an event arrives
+    // or the 100ms tick elapses.
+    while (g_running) {
+        if (!display_wait(d, 100)) break;
     }
 
     display_disconnect(d);
