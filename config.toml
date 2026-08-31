@@ -8,6 +8,11 @@ height = 34               # hauteur des barres en pixels
 font = "Sans 11"
 theme = "dark"
 
+# Désactivation d'un shell déjà en place au démarrage (waybar, eww...).
+take_over = true
+take_over_dry_run = false     # met à true pour seulement signaler, sans tuer
+# take_over_kill = ["waybar", "eww"]
+
 [theme.colors]
 background = "#1e1e2e"
 foreground = "#cdd6f4"

@@ -12,11 +12,13 @@ void render_fill_strip(ISurface& s, int y, int strip_h, uint32_t argb) {
     const int h = s.height();
     if (w <= 0 || h <= 0) return;
 
+    uint32_t* px = static_cast<uint32_t*>(s.pixel_data());
+    if (!px) return;  // surface not sized/attached yet
+
     const int y0 = std::max(0, y);
     const int y1 = std::min(h, y + strip_h);
     if (y0 >= y1) return;
 
-    uint32_t* px = static_cast<uint32_t*>(s.pixel_data());
     const size_t row_words = static_cast<size_t>(s.stride()) / 4;
     for (int row = y0; row < y1; ++row) {
         uint32_t* p = px + row * row_words;
@@ -30,6 +32,7 @@ void render_background(ISurface& s, uint32_t argb, int radius) {
     if (w <= 0 || h <= 0) return;
 
     uint32_t* px = static_cast<uint32_t*>(s.pixel_data());
+    if (!px) return;  // surface not sized/attached yet
     const size_t row_words = static_cast<size_t>(s.stride()) / 4;
     const int r = std::max(0, std::min(radius, std::min(w, h) / 2));
 

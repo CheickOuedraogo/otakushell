@@ -3,8 +3,11 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <wayland-client.h>
+
+#include "otaku/config.hpp"
 
 #include "wlr-layer-shell-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
@@ -45,6 +48,7 @@ public:
 
 // The Wayland client context shared by all surfaces.
 struct Display {
+    bool alive{true};  // false once the connection is closed/crashed
     wl_display* display{nullptr};
     wl_registry* registry{nullptr};
     wl_compositor* compositor{nullptr};
@@ -55,12 +59,17 @@ struct Display {
     ext_session_lock_manager_v1* session_lock{nullptr};
 };
 
-// Connect to the Wayland display, bind globals, collect outputs.
+// Connect to the Wayland display, bind globals, collect outputs (if `out`
+// is non-null it is filled with one Output per wl_output advertised).
 // Returns false on failure; `err` holds a message.
-bool display_connect(Display& d, std::string& err);
+bool display_connect(Display& d, std::vector<Output>* out, std::string& err);
 
 // Poll and dispatch pending events (non-blocking). Returns false if display closed.
 bool display_poll(Display& d);
+
+// Wait up to `timeout_ms` for events, dispatching any that arrive.
+// Returns false if the display was closed. Used to sleep without burning CPU.
+bool display_wait(Display& d, int timeout_ms);
 
 void display_disconnect(Display& d);
 
@@ -68,8 +77,8 @@ void display_disconnect(Display& d);
 std::unique_ptr<ISurface> create_layer_surface(Display& d,
                                                Output* output,
                                                std::string ns,
-                                               uint32_t anchor,
-                                               int32_t height,
+                                               Anchor anchor,
+                                               int32_t bar_size,
                                                bool exclusive_zone);
 
 // Create a normal toplevel window (used by `otakushell preview`).
