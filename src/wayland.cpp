@@ -116,9 +116,12 @@ struct ShmSurface {
         return true;
     }
 
-    void destroy() {
+    // destroy(wayland_ok): when the Wayland connection is already closed
+    // (e.g. a compositor protocol error), only unmap memory and never touch
+    // the Wayland proxies (that would marshal over a dead connection).
+    void destroy(bool wayland_ok = true) {
         for (int i = 0; i < 2; ++i) {
-            if (buffers[i]) wl_buffer_destroy(buffers[i]);
+            if (wayland_ok && buffers[i]) wl_buffer_destroy(buffers[i]);
             if (data[i]) munmap(data[i], size);
         }
         buffers[0] = buffers[1] = nullptr;
@@ -181,8 +184,11 @@ public:
     }
 
     ~LayerSurface() override {
-        if (display_.alive && layer_) zwlr_layer_surface_v1_destroy(layer_);
-        shm_.destroy();
+        if (display_.alive) {
+            if (layer_) zwlr_layer_surface_v1_destroy(layer_);
+            if (wl_surface_) wl_surface_destroy(wl_surface_);
+        }
+        shm_.destroy(display_.alive);
     }
 
     void set_size(int32_t width, int32_t height) override {
