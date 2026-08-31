@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <wayland-client.h>
 
@@ -55,9 +56,10 @@ struct Display {
     ext_session_lock_manager_v1* session_lock{nullptr};
 };
 
-// Connect to the Wayland display, bind globals, collect outputs.
+// Connect to the Wayland display, bind globals, collect outputs (if `out`
+// is non-null it is filled with one Output per wl_output advertised).
 // Returns false on failure; `err` holds a message.
-bool display_connect(Display& d, std::string& err);
+bool display_connect(Display& d, std::vector<Output>* out, std::string& err);
 
 // Poll and dispatch pending events (non-blocking). Returns false if display closed.
 bool display_poll(Display& d);

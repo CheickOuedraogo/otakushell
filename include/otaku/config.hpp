@@ -35,6 +35,11 @@ struct ShellConfig {
     std::string theme{"dark"};
     ThemeColors colors;
     std::vector<FrameSpec> frames;
+
+    // Take-over of an existing shell running on the desktop.
+    bool take_over{true};                         // disable an existing shell at startup
+    bool take_over_dry_run{false};                // only report, don't terminate
+    std::vector<std::string> take_over_kill;      // extra processes to disable
 };
 
 // Load configuration from a TOML file. Returns false on parse error.

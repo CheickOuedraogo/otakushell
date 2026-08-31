@@ -50,6 +50,13 @@ bool load_config(const std::string& path, ShellConfig& out) {
         if (auto h = (*sh)["height"].value<int>()) out.height = *h;
         if (auto f = (*sh)["font"].value<std::string>()) out.font = *f;
         if (auto t = (*sh)["theme"].value<std::string>()) out.theme = *t;
+        if (auto v = (*sh)["take_over"].value<bool>()) out.take_over = *v;
+        if (auto v = (*sh)["take_over_dry_run"].value<bool>()) out.take_over_dry_run = *v;
+        if (auto a = (*sh)["take_over_kill"].as_array()) {
+            out.take_over_kill.clear();
+            for (const auto& m : *a)
+                if (auto s = m.value<std::string>()) out.take_over_kill.push_back(*s);
+        }
     }
 
     if (auto th = tbl["theme"].as_table()) {

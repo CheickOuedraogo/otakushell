@@ -66,6 +66,7 @@ add_library(otaku_core STATIC
   src/shm.cpp
   src/frame.cpp
   src/module.cpp
+  src/hypr.cpp
   ${PROTOCOL_GEN_DIR}/wlr-layer-shell-protocol.c
   ${PROTOCOL_GEN_DIR}/xdg-shell-protocol.c
   ${PROTOCOL_GEN_DIR}/xdg-output-protocol.c
