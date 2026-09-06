@@ -71,6 +71,9 @@ void registry_global(void* data, wl_registry*, uint32_t name, const char* iface,
             d->registry, name, &ext_session_lock_manager_v1_interface, 1));
     } else if (std::strcmp(iface, wl_output_interface.name) == 0) {
         ctx->outputs->push_back(Output{name, {}, {}, 0, 0, 1, false});
+    } else if (std::strcmp(iface, wl_seat_interface.name) == 0) {
+        d->seat = static_cast<wl_seat*>(
+            wl_registry_bind(d->registry, name, &wl_seat_interface, 1));
     }
 }
 
@@ -134,13 +137,29 @@ struct ShmSurface {
 };
 
 // ---------------------------------------------------------------------------
+// Auto-hide edge registry
+// ---------------------------------------------------------------------------
+// Layer surfaces created with `auto_hide` register their wl_surface here.
+// Pointer enter/leave on that surface expands/shrinks the edge.
+struct EdgeEntry {
+    wl_surface* wl_surf{nullptr};
+    ISurface* surf{nullptr};
+};
+std::vector<EdgeEntry> g_edge_registry;
+
+// ---------------------------------------------------------------------------
 // Layer-surface implementation (production bars, anchored panels)
 // ---------------------------------------------------------------------------
 class LayerSurface final : public ISurface {
 public:
     LayerSurface(Display& d, Output* output, std::string ns, Anchor anchor,
-                 int32_t bar_size, bool exclusive)
-        : display_(d), namespace_(std::move(ns)), anchor_(anchor) {
+                 int32_t bar_size, bool exclusive, bool auto_hide)
+        : display_(d),
+          namespace_(std::move(ns)),
+          anchor_(anchor),
+          bar_size_(bar_size),
+          exclusive_(exclusive),
+          auto_hide_(auto_hide) {
         shm_.compositor = d.compositor;
         shm_.shm = d.shm;
         wl_surface_ = wl_compositor_create_surface(d.compositor);
@@ -170,10 +189,19 @@ public:
         }
 
         if (horizontal) {
-            zwlr_layer_surface_v1_set_size(layer_, 0, static_cast<uint32_t>(bar_size));
+            shown_w_ = 0;
+            shown_h_ = bar_size;
+            hidden_w_ = 0;
+            hidden_h_ = 1;  // 1px-tall trigger strip along the whole width
         } else {
-            zwlr_layer_surface_v1_set_size(layer_, static_cast<uint32_t>(bar_size), 0);
+            shown_w_ = bar_size;
+            shown_h_ = 0;
+            hidden_w_ = 1;  // 1px-wide trigger strip along the whole height
+            hidden_h_ = 0;
         }
+
+        zwlr_layer_surface_v1_set_size(layer_, static_cast<uint32_t>(shown_w_),
+                                       static_cast<uint32_t>(shown_h_));
         zwlr_layer_surface_v1_set_anchor(layer_, flags);
         if (exclusive)
             zwlr_layer_surface_v1_set_exclusive_zone(layer_, bar_size);
@@ -182,9 +210,20 @@ public:
 
         zwlr_layer_surface_v1_add_listener(layer_, &layer_listener_, this);
         wl_surface_commit(wl_surface_);
+
+        // Register for pointer-hover auto-hide on this surface.
+        if (auto_hide_) g_edge_registry.push_back({wl_surface_, this});
     }
 
     ~LayerSurface() override {
+        if (auto_hide_) {
+            for (auto it = g_edge_registry.begin(); it != g_edge_registry.end(); ++it) {
+                if (it->surf == this) {
+                    g_edge_registry.erase(it);
+                    break;
+                }
+            }
+        }
         if (display_.alive) {
             if (layer_) zwlr_layer_surface_v1_destroy(layer_);
             if (wl_surface_) wl_surface_destroy(wl_surface_);
@@ -192,16 +231,15 @@ public:
         shm_.destroy(display_.alive);
     }
 
+    wl_surface* surface_handle() const { return wl_surface_; }
+
     void set_size(int32_t width, int32_t height) override {
         if (width == shm_.w && height == shm_.h) {
             present();  // re-present after resize-less configure
             return;
         }
         if (shm_.data[0]) shm_.destroy();
-        if (shm_.create(width, height)) {
-            anchor_width_ = width;
-            anchor_height_ = height;
-        }
+        shm_.create(width, height);  // buffer sized; owner redraws via on_resize
     }
 
     void present() override {
@@ -219,12 +257,34 @@ public:
     size_t buffer_size() const override { return shm_.size; }
     int32_t stride() const override { return static_cast<int32_t>(shm_.stride); }
 
+    bool visible() const override { return auto_hide_ ? visible_ : true; }
+
+    // Auto-hide: show the full edge (with exclusive zone) or collapse to the
+    // 1px trigger strip (no exclusive zone). A no-op unless auto_hide_.
+    void set_visible(bool v) override {
+        if (!auto_hide_ || v == visible_) return;
+        visible_ = v;
+        if (v) {
+            zwlr_layer_surface_v1_set_size(layer_, static_cast<uint32_t>(shown_w_),
+                                           static_cast<uint32_t>(shown_h_));
+            if (exclusive_)
+                zwlr_layer_surface_v1_set_exclusive_zone(layer_, bar_size_);
+        } else {
+            zwlr_layer_surface_v1_set_size(layer_, static_cast<uint32_t>(hidden_w_),
+                                           static_cast<uint32_t>(hidden_h_));
+            zwlr_layer_surface_v1_set_exclusive_zone(layer_, 0);
+        }
+        wl_surface_commit(wl_surface_);
+    }
+
 private:
     static void handle_configure(void* data, zwlr_layer_surface_v1*, uint32_t serial,
                                  uint32_t w, uint32_t h) {
         auto* self = static_cast<LayerSurface*>(data);
         zwlr_layer_surface_v1_ack_configure(self->layer_, serial);
         self->set_size(static_cast<int32_t>(w), static_cast<int32_t>(h));
+        // The front buffer changed size; let the owner re-render it.
+        if (self->on_resize) self->on_resize();
     }
     static void handle_close(void*, zwlr_layer_surface_v1*) {}
 
@@ -237,7 +297,12 @@ private:
     zwlr_layer_surface_v1* layer_{nullptr};
     wl_surface* wl_surface_{nullptr};
     ShmSurface shm_{};
-    int32_t anchor_width_{0}, anchor_height_{0};
+    int32_t bar_size_{0};
+    bool exclusive_{false};
+    bool auto_hide_{false};
+    bool visible_{true};
+    int32_t shown_w_{0}, shown_h_{0};
+    int32_t hidden_w_{0}, hidden_h_{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -310,6 +375,9 @@ public:
     size_t buffer_size() const override { return shm_.size; }
     int32_t stride() const override { return static_cast<int32_t>(shm_.stride); }
 
+    bool visible() const override { return true; }
+    void set_visible(bool) override { /* windows are always visible */ }
+
 private:
     static void handle_surface_configure(void* data, xdg_surface*, uint32_t serial) {
         auto* self = static_cast<ToplevelSurface*>(data);
@@ -319,7 +387,10 @@ private:
     static void handle_toplevel_configure(void* data, xdg_toplevel*, int32_t width,
                                           int32_t height, wl_array*) {
         auto* self = static_cast<ToplevelSurface*>(data);
-        if (width > 0 && height > 0) self->set_size(width, height);
+        if (width > 0 && height > 0) {
+            self->set_size(width, height);
+            if (self->on_resize) self->on_resize();
+        }
     }
 
     static void handle_toplevel_close(void* data, xdg_toplevel*) {
@@ -341,6 +412,68 @@ private:
     ShmSurface shm_{};
     int32_t width_{0}, height_{0};
 };
+
+// ---------------------------------------------------------------------------
+// Seat / pointer tracking (used by auto-hide edges)
+// ---------------------------------------------------------------------------
+void pointer_enter(void*, wl_pointer*, uint32_t, wl_surface* surface, wl_fixed_t,
+                   wl_fixed_t) {
+    for (const auto& e : g_edge_registry) {
+        if (e.wl_surf == surface) {
+            e.surf->set_visible(true);
+            break;
+        }
+    }
+}
+
+void pointer_leave(void*, wl_pointer*, uint32_t, wl_surface* surface) {
+    for (const auto& e : g_edge_registry) {
+        if (e.wl_surf == surface) {
+            e.surf->set_visible(false);
+            break;
+        }
+    }
+}
+
+// wl_pointer version 1: only the first five events exist. The full listener
+// is still filled so the build is warning-free; later events never fire at
+// the version we bound.
+static constexpr wl_pointer_listener g_pointer_listener = {
+    pointer_enter,
+    pointer_leave,
+    [](void*, wl_pointer*, uint32_t, wl_fixed_t, wl_fixed_t) {},  // motion
+    [](void*, wl_pointer*, uint32_t, uint32_t, uint32_t, uint32_t) {},  // button
+    [](void*, wl_pointer*, uint32_t, uint32_t, wl_fixed_t) {},  // axis
+    nullptr,   // frame
+    nullptr,   // axis_source
+    nullptr,   // axis_stop
+    nullptr,   // axis_discrete
+    nullptr,   // axis_value120
+    nullptr,   // axis_relative_direction
+    nullptr,   // warp
+};
+
+// Bind the seat's pointer if the compositor has one. The capabilities event
+// is already queued (delivered by the roundtrip below), so the pointer is
+// created synchronously.
+void init_seat_pointer(Display& d) {
+    if (!d.seat || d.pointer) return;
+    static const wl_seat_listener seat_listener = {
+        [](void* data, wl_seat* seat, uint32_t capabilities) {
+            auto* dd = static_cast<Display*>(data);
+            if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !dd->pointer) {
+                dd->pointer = wl_seat_get_pointer(seat);
+                wl_pointer_add_listener(dd->pointer, &g_pointer_listener, dd);
+            } else if (!(capabilities & WL_SEAT_CAPABILITY_POINTER) && dd->pointer) {
+                wl_pointer_destroy(dd->pointer);
+                dd->pointer = nullptr;
+            }
+        },
+        nullptr  // name (seat v2+, not fired at the v1 we bound)
+    };
+    wl_seat_add_listener(d.seat, &seat_listener, &d);
+    wl_display_roundtrip(d.display);  // deliver the capabilities event
+}
 
 }  // namespace
 
@@ -368,6 +501,8 @@ bool display_connect(Display& d, std::vector<Output>* outputs, std::string& err,
     else if (!d.xdg_base)
         err = "compositor does not expose xdg-shell";
     if (!err.empty()) return false;
+
+    init_seat_pointer(d);
     return true;
 }
 
@@ -399,6 +534,12 @@ bool display_wait(Display& d, int timeout_ms) {
 
     int pr = poll(&pfd, 1, timeout_ms);
     if (pr < 0) {
+        if (errno == EINTR) {
+            // A signal (e.g. SIGUSR1 reload) interrupted the poll; the caller
+            // checks its flags on the next iteration.
+            wl_display_cancel_read(d.display);
+            return true;
+        }
         d.alive = false;
         wl_display_cancel_read(d.display);
         return false;
@@ -423,9 +564,10 @@ void display_disconnect(Display& d) {
 
 std::unique_ptr<ISurface> create_layer_surface(Display& d, Output* output,
                                                std::string ns, Anchor anchor,
-                                               int32_t bar_size, bool exclusive) {
+                                               int32_t bar_size, bool exclusive,
+                                               bool auto_hide) {
     return std::make_unique<LayerSurface>(d, output, std::move(ns), anchor,
-                                          bar_size, exclusive);
+                                          bar_size, exclusive, auto_hide);
 }
 
 std::unique_ptr<ISurface> create_toplevel_surface(Display& d, std::string title,

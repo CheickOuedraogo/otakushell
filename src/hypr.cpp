@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,29 @@ bool process_running(const std::string& proc) {
 }
 
 }  // namespace
+
+std::string pidfile_path() {
+    const char* run = getenv("XDG_RUNTIME_DIR");
+    const char* base = (run && *run) ? run : "/tmp";
+    return std::string(base) + "/otakud.pid";
+}
+
+bool write_pidfile() {
+    const auto path = pidfile_path();
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) return false;
+    f << static_cast<long>(getpid()) << '\n';
+    return static_cast<bool>(f);
+}
+
+bool read_pidfile(int& out_pid) {
+    std::ifstream f(pidfile_path());
+    if (!f) return false;
+    f >> out_pid;
+    return static_cast<bool>(f) && out_pid > 0;
+}
+
+void remove_pidfile() { std::remove(pidfile_path().c_str()); }
 
 bool hyprland_available() {
     static const char* sig = getenv("HYPRLAND_INSTANCE_SIGNATURE");

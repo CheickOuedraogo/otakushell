@@ -4,8 +4,11 @@
 #include <cstring>
 #include <string>
 
+#include <csignal>
+
 #include "otaku/config.hpp"
 #include "otaku/frame.hpp"
+#include "otaku/hypr.hpp"
 #include "otaku/wayland.hpp"
 
 using namespace otaku;
@@ -90,6 +93,7 @@ int main(int argc, char** argv) {
         }
 
         Frame frame(*fspec);
+        frame.set_theme(cfg.colors);
         frame.set_surface(std::move(surf));
 
         // Let the compositor deliver the initial configure, then first frame.
@@ -111,7 +115,23 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (cmd == "reload" || cmd == "status" || cmd == "exec" || cmd == "module") {
+    if (cmd == "reload") {
+        int pid = 0;
+        if (!read_pidfile(pid)) {
+            std::fprintf(stderr,
+                         "otakushell: could not find otakud PID — is it running?\n");
+            return 1;
+        }
+        if (kill(pid, SIGUSR1) != 0) {
+            std::fprintf(stderr, "otakushell: failed to signal otakud (pid %d)\n",
+                         pid);
+            return 1;
+        }
+        std::printf("otakushell: signaled otakud (pid %d) to reload config\n", pid);
+        return 0;
+    }
+
+    if (cmd == "status" || cmd == "exec" || cmd == "module") {
         std::printf("otakushell: '%s' is not implemented yet.\n", cmd.c_str());
         return 0;
     }

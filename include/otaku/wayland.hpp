@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -45,6 +46,15 @@ public:
     virtual void* pixel_data() = 0;
     virtual size_t buffer_size() const = 0;
     virtual int32_t stride() const = 0;
+
+    // Visibility used by auto-hide edges: hidden surfaces shrink to a thin
+    // trigger strip instead of being unmapped.
+    virtual bool visible() const = 0;
+    virtual void set_visible(bool visible) = 0;
+
+    // Called by the surface implementation after a size/visibility change so
+    // the owner (the Frame) can redraw the new buffer. May be null.
+    std::function<void()> on_resize;
 };
 
 // The Wayland client context shared by all surfaces.
@@ -58,6 +68,8 @@ struct Display {
     xdg_wm_base* xdg_base{nullptr};
     zxdg_output_manager_v1* xdg_output_manager{nullptr};
     ext_session_lock_manager_v1* session_lock{nullptr};
+    wl_seat* seat{nullptr};      // bound if the compositor has one
+    wl_pointer* pointer{nullptr};  // created when the seat has pointer capability
 };
 
 // Connect to the Wayland display, bind globals, collect outputs (if `out`
@@ -78,12 +90,15 @@ bool display_wait(Display& d, int timeout_ms);
 void display_disconnect(Display& d);
 
 // Create a layer-shell surface (production bar). `output` nullptr = all.
+// `auto_hide` shrinks the surface to a thin trigger strip and expands it
+// (plus exclusive zone) while the pointer hovers it (edge auto-hide).
 std::unique_ptr<ISurface> create_layer_surface(Display& d,
                                                Output* output,
                                                std::string ns,
                                                Anchor anchor,
                                                int32_t bar_size,
-                                               bool exclusive_zone);
+                                               bool exclusive_zone,
+                                               bool auto_hide = false);
 
 // Create a normal toplevel window (used by `otakushell preview`).
 // `width`/`height` are the window's default size in pixels. `close_flag`

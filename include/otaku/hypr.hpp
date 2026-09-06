@@ -24,4 +24,10 @@ MaimReport maim_existing_shell(const std::vector<std::string>& process_kill_list
 // Whether the Hyprland compositor is currently available.
 bool hyprland_available();
 
+// Daemon PID file, used by `otakushell reload` to signal `otakud` (SIGUSR1).
+std::string pidfile_path();
+bool write_pidfile();
+bool read_pidfile(int& out_pid);
+void remove_pidfile();
+
 }  // namespace otaku
