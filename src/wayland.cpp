@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -239,9 +240,112 @@ private:
     int32_t anchor_width_{0}, anchor_height_{0};
 };
 
+// ---------------------------------------------------------------------------
+// Toplevel-surface implementation (a normal xdg window, used by preview)
+// ---------------------------------------------------------------------------
+class ToplevelSurface final : public ISurface {
+public:
+    ToplevelSurface(Display& d, std::string title, int32_t width, int32_t height,
+                    std::atomic<bool>* close_flag)
+        : display_(d), title_(std::move(title)), close_flag_(close_flag) {
+        shm_.compositor = d.compositor;
+        shm_.shm = d.shm;
+        wl_surface_ = wl_compositor_create_surface(d.compositor);
+
+        xdg_surface_ =
+            xdg_wm_base_get_xdg_surface(d.xdg_base, wl_surface_);
+        xdg_toplevel_ = xdg_surface_get_toplevel(xdg_surface_);
+        xdg_toplevel_set_title(xdg_toplevel_, title_.c_str());
+        xdg_toplevel_set_app_id(xdg_toplevel_, "otakushell-preview");
+
+        // Pin the window to its bar/edge dimensions (fixed size, no resize).
+        if (width > 0 && height > 0) {
+            xdg_toplevel_set_min_size(xdg_toplevel_, width, height);
+            xdg_toplevel_set_max_size(xdg_toplevel_, width, height);
+        }
+
+        xdg_surface_add_listener(xdg_surface_, &surface_listener_, this);
+        xdg_toplevel_add_listener(xdg_toplevel_, &toplevel_listener_, this);
+
+        // Fallback size until the compositor sends a configure with a
+        // non-zero dimension (then the real size wins).
+        if (width > 0 && height > 0) set_size(width, height);
+
+        wl_surface_commit(wl_surface_);
+    }
+
+    ~ToplevelSurface() override {
+        if (display_.alive) {
+            if (xdg_toplevel_) xdg_toplevel_destroy(xdg_toplevel_);
+            if (xdg_surface_) xdg_surface_destroy(xdg_surface_);
+            if (wl_surface_) wl_surface_destroy(wl_surface_);
+        }
+        shm_.destroy(display_.alive);
+    }
+
+    void set_size(int32_t width, int32_t height) override {
+        if (width == shm_.w && height == shm_.h) {
+            present();  // re-present after a resize-less configure
+            return;
+        }
+        if (shm_.data[0]) shm_.destroy();
+        if (shm_.create(width, height)) {
+            width_ = width;
+            height_ = height;
+        }
+    }
+
+    void present() override {
+        if (!wl_surface_ || !shm_.data[0]) return;
+        wl_surface_attach(wl_surface_, shm_.buffers[shm_.front], 0, 0);
+        wl_surface_damage_buffer(wl_surface_, 0, 0, INT32_MAX, INT32_MAX);
+        wl_surface_commit(wl_surface_);
+        shm_.front = (shm_.front + 1) % 2;
+    }
+
+    int32_t width() const override { return shm_.w; }
+    int32_t height() const override { return shm_.h; }
+    wl_buffer* buffer() const override { return shm_.buffers[shm_.front]; }
+    void* pixel_data() override { return shm_.data[shm_.front]; }
+    size_t buffer_size() const override { return shm_.size; }
+    int32_t stride() const override { return static_cast<int32_t>(shm_.stride); }
+
+private:
+    static void handle_surface_configure(void* data, xdg_surface*, uint32_t serial) {
+        auto* self = static_cast<ToplevelSurface*>(data);
+        xdg_surface_ack_configure(self->xdg_surface_, serial);
+    }
+
+    static void handle_toplevel_configure(void* data, xdg_toplevel*, int32_t width,
+                                          int32_t height, wl_array*) {
+        auto* self = static_cast<ToplevelSurface*>(data);
+        if (width > 0 && height > 0) self->set_size(width, height);
+    }
+
+    static void handle_toplevel_close(void* data, xdg_toplevel*) {
+        auto* self = static_cast<ToplevelSurface*>(data);
+        if (self->close_flag_) self->close_flag_->store(false);
+    }
+
+    static constexpr xdg_surface_listener surface_listener_ = {
+        handle_surface_configure};
+    static constexpr xdg_toplevel_listener toplevel_listener_ = {
+        handle_toplevel_configure, handle_toplevel_close, nullptr, nullptr};
+
+    Display& display_;
+    std::string title_;
+    std::atomic<bool>* close_flag_{nullptr};
+    xdg_surface* xdg_surface_{nullptr};
+    xdg_toplevel* xdg_toplevel_{nullptr};
+    wl_surface* wl_surface_{nullptr};
+    ShmSurface shm_{};
+    int32_t width_{0}, height_{0};
+};
+
 }  // namespace
 
-bool display_connect(Display& d, std::vector<Output>* outputs, std::string& err) {
+bool display_connect(Display& d, std::vector<Output>* outputs, std::string& err,
+                     bool need_layer_shell) {
     d = Display{};
     d.display = wl_display_connect(nullptr);
     if (!d.display) {
@@ -259,7 +363,7 @@ bool display_connect(Display& d, std::vector<Output>* outputs, std::string& err)
     wl_display_roundtrip(d.display);
     if (!d.compositor || !d.shm)
         err = "compositor does not support wl_compositor/wl_shm";
-    else if (!d.layer_shell)
+    else if (need_layer_shell && !d.layer_shell)
         err = "compositor does not expose wlr-layer-shell (not Hyprland/wlroots?)";
     else if (!d.xdg_base)
         err = "compositor does not expose xdg-shell";
@@ -324,8 +428,11 @@ std::unique_ptr<ISurface> create_layer_surface(Display& d, Output* output,
                                           bar_size, exclusive);
 }
 
-std::unique_ptr<ISurface> create_toplevel_surface(Display&, std::string) {
-    return nullptr;  // implemented in step 2
+std::unique_ptr<ISurface> create_toplevel_surface(Display& d, std::string title,
+                                                  int32_t width, int32_t height,
+                                                  std::atomic<bool>* close_flag) {
+    return std::make_unique<ToplevelSurface>(d, std::move(title), width, height,
+                                             close_flag);
 }
 
 }  // namespace otaku

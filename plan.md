@@ -84,13 +84,19 @@ démarrage via `hyprctl`.
 - [x] Validé par l'utilisateur (barres affichées + arrêt Ctrl+C propre).
 - **Mergé : `merge: feat/core-wayland (step 1 ...)`** (`d5c6f8c`).
 
-### Étape 2 — Preview autonome (saute le compositor)  ⏳ À FAIRE
-- [ ] Abstraire l'interface `ISurface` pour supporter un `ToplevelSurface`
+### Étape 2 — Preview autonome (saute le compositor)  ✅ TERMINÉ
+- [x] Abstraire l'interface `ISurface` pour supporter un `ToplevelSurface`
       (fenêtre `xdg-toplevel`) en plus des `LayerSurface`.
-- [ ] Implémenter `otakushell preview` : instance standalone sur fenêtre
-      xdg-toplevel, données **mockées**, sans daemon ni compositor nécessaire
-      pour voir les barres.
-- [ ] Permettre de développer sans compositor dans l'env de dev.
+- [x] Implémenter `otakushell preview [frame-id]` : instance standalone sur
+      une fenêtre xdg-toplevel, données **mockées**, sans daemon ni barres
+      ancrées — le même moteur de rendu et framework `Frame` est réutilisé.
+- [x] `display_connect(need_layer_shell=false)` : le preview n'exige que
+      xdg-shell (pas wlr-layer-shell), le daemon garde l'exigence layer-shell.
+- [x] Fenêtre épinglée aux dimensions bar/edge (min=max size) via
+      `xdg_toplevel_set_min_size/max_size` ; fermeture par l'utilisateur →
+      callback `close` → sortie propre (code 0).
+- [x] Validé par l'utilisateur (fenêtre affichée, fermeture propre, daemon
+      intact).
 
 ### Étape 3 — Framework frames + config chaude
 - [ ] Framework frames générique (chargement des frames depuis la config).
@@ -118,7 +124,7 @@ démarrage via `hyprctl`.
 |-------|---------|
 | 0 — Squelette            | ✅ Terminé |
 | 1 — Noyau layer-shell    | ✅ Terminé (mergé dans `main`) |
-| 2 — Preview autonome     | ⏳ Suivant |
+| 2 — Preview autonome     | ✅ Terminé (branche `feat/preview-toplevel`) |
 | 3 — Frames + hot-reload  | ⬜ À venir |
 | 4 — Modules & IPC        | ⬜ À venir |
 | Lockscreen + suite       | ⬜ À venir |
