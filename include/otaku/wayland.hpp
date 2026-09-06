@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -61,8 +62,11 @@ struct Display {
 
 // Connect to the Wayland display, bind globals, collect outputs (if `out`
 // is non-null it is filled with one Output per wl_output advertised).
-// Returns false on failure; `err` holds a message.
-bool display_connect(Display& d, std::vector<Output>* out, std::string& err);
+// `need_layer_shell` requires wlr-layer-shell (true for the daemon, whose
+// frames are layer surfaces; false for the standalone toplevel `preview`,
+// which only needs xdg-shell). Returns false on failure; `err` holds a message.
+bool display_connect(Display& d, std::vector<Output>* out, std::string& err,
+                     bool need_layer_shell = true);
 
 // Poll and dispatch pending events (non-blocking). Returns false if display closed.
 bool display_poll(Display& d);
@@ -82,6 +86,11 @@ std::unique_ptr<ISurface> create_layer_surface(Display& d,
                                                bool exclusive_zone);
 
 // Create a normal toplevel window (used by `otakushell preview`).
-std::unique_ptr<ISurface> create_toplevel_surface(Display& d, std::string title);
+// `width`/`height` are the window's default size in pixels. `close_flag`
+// (optional) is set to false when the user closes the window, so the caller's
+// event loop can quit.
+std::unique_ptr<ISurface> create_toplevel_surface(Display& d, std::string title,
+                                                  int32_t width, int32_t height,
+                                                  std::atomic<bool>* close_flag);
 
 }  // namespace otaku
