@@ -99,10 +99,17 @@ démarrage via `hyprctl`.
       intact).
 
 ### Étape 3 — Framework frames + config chaude
-- [ ] Framework frames générique (chargement des frames depuis la config).
-- [ ] Hot-reload de la config (`otakushell reload`).
-- [ ] Application du thème (fond/texte/accent/surfaced).
-- [ ] Auto-hide pour l'edge (edge-right).
+- [x] Framework frames générique : `build_frames()` instancie une `Frame` par
+      frame déclarée dans la config (utilisée par le daemon ET le preview),
+      avec `on_resize` pour re-rendre au resize.
+- [x] Hot-reload de la config : `otakushell reload` lit le PID file
+      (`XDG_RUNTIME_DIR/otakud.pid`) et envoie `SIGUSR1` à `otakud` ; le daemon
+      re-charge la config et reconstruit les frames (EINTR géré dans le poll).
+- [x] Application du thème : `Frame::set_theme(const ThemeColors&)` et
+      `render_background` depuis `[theme.colors]` de la config.
+- [x] Auto-hide pour l'edge (edge-right) : export `hidden = "auto"` en bool,
+      `LayerSurface` collabée en strip trigger 1px sans zone exclusive, pointer
+      tracking `wl_pointer` (enter → affiche, leave → recycle).
 
 ### Étape 4 — Modules & IPC mémoire partagée
 - [ ] Plateforme de modules isolés (processus séparés) communiquant par
@@ -125,7 +132,7 @@ démarrage via `hyprctl`.
 | 0 — Squelette            | ✅ Terminé |
 | 1 — Noyau layer-shell    | ✅ Terminé (mergé dans `main`) |
 | 2 — Preview autonome     | ✅ Terminé (branche `feat/preview-toplevel`) |
-| 3 — Frames + hot-reload  | ⬜ À venir |
+| 3 — Frames + hot-reload  | ✅ Terminé (branche `feat/frames-config`) |
 | 4 — Modules & IPC        | ⬜ À venir |
 | Lockscreen + suite       | ⬜ À venir |
 

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <execinfo.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "otaku/config.hpp"
@@ -19,7 +20,15 @@ using namespace otaku;
 namespace {
 
 volatile std::sig_atomic_t g_running = 1;
-void on_signal(int) { g_running = 0; }
+volatile std::sig_atomic_t g_reload = 0;  // set by SIGUSR1 (hot-reload)
+
+void on_signal(int sig) {
+    if (sig == SIGUSR1) {
+        g_reload = 1;
+        return;
+    }
+    g_running = 0;
+}
 
 void on_fatal(int sig) {
     std::fprintf(stderr, "\notakud: fatal signal %d (SIG%s), pid %d\n", sig,
@@ -69,38 +78,28 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+    std::signal(SIGUSR1, on_signal);
     std::signal(SIGSEGV, on_fatal);
     std::signal(SIGABRT, on_fatal);
     std::printf("otakud: starting, pid %d\n", static_cast<int>(getpid()));
 
-    // Build one Frame per configured frame, backed by a layer surface.
-    // Step 1 only handles anchored bars (top/bottom/left/right); the
-    // fullscreen lockscreen frame arrives in a later step.
-    std::vector<std::unique_ptr<Frame>> frames;
-    for (const auto& fspec : cfg.frames) {
-        // Step 1 only handles anchored bars (top/bottom/left/right); the
-        // fullscreen lockscreen frame arrives in a later step.
-        if (fspec.anchor == Anchor::None || fspec.anchor == Anchor::Full) continue;
+    write_pidfile();  // lets `otakushell reload` find and signal us
 
-        const auto make_frame = [&](Output* out) {
-            auto surf = create_layer_surface(d, out, "otaku-" + fspec.id,
-                                             fspec.anchor, cfg.height,
-                                             fspec.exclusive);
-            auto f = std::make_unique<Frame>(fspec);
-            f->set_surface(std::move(surf));
-            frames.push_back(std::move(f));
-        };
-
-        if (cfg.monitor == "auto" && !outputs.empty()) {
-            for (auto& out : outputs) make_frame(&out);
-        } else {
-            make_frame(nullptr);  // single surface for now (all monitors)
-        }
-    }
-
+    // One Frame per configured frame, backed by a layer surface (step 3:
+    // generic frame loading + theme from config; auto-hide edges collapse).
+    std::vector<std::unique_ptr<Frame>> frames = build_frames(d, cfg, outputs);
     std::printf("otakud: created %zu frame surface(s)\n", frames.size());
     if (frames.empty())
         std::fprintf(stderr, "otakud: warning: no anchored frames were declared\n");
+
+    // Rebuild a fresh set of frames from the current config + theme.
+    const auto apply_frames = [&]() {
+        frames.clear();  // destroys old layer surfaces
+        frames = build_frames(d, cfg, outputs);
+        wl_display_roundtrip(d.display);
+        for (auto& f : frames) f->render();
+        wl_display_flush(d.display);
+    };
 
     // Wait for layer-shell configure (delivers the real size) and present.
     wl_display_roundtrip(d.display);
@@ -108,11 +107,28 @@ int main(int argc, char** argv) {
     wl_display_flush(d.display);
 
     // Event loop. display_wait sleeps (no busy-loop) until an event arrives
-    // or the 100ms tick elapses.
+    // or the 100ms tick elapses. SIGUSR1 interrupts the poll (EINTR) and sets
+    // g_reload, so the next iteration re-reads the config.
     while (g_running) {
+        if (g_reload) {
+            g_reload = 0;
+            ShellConfig next;
+            if (load_config(cfg_path, next)) {
+                std::printf("otakud: reloading '%s'\n", cfg_path.c_str());
+                cfg = std::move(next);
+                apply_frames();
+                std::printf("otakud: reloaded, %zu frame surface(s)\n",
+                            frames.size());
+            } else {
+                std::fprintf(stderr,
+                             "otakud: reload failed (parse error), keeping "
+                             "previous config\n");
+            }
+        }
         if (!display_wait(d, 100)) break;
     }
 
+    remove_pidfile();
     display_disconnect(d);
     std::printf("otakud: bye\n");
     return 0;
