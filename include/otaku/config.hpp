@@ -1,8 +1,10 @@
 #pragma once
 
+#include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
-#include <optional>
 
 namespace otaku {
 
@@ -28,6 +30,10 @@ struct FrameSpec {
     std::vector<std::string> order;
 };
 
+// Per-module options, as declared under `[modules.<name>]` in config.toml.
+// They are passed verbatim to the module producer (`otakud-mod`).
+using ModuleOptions = std::map<std::string, std::string>;
+
 struct ShellConfig {
     std::string monitor{"auto"};
     int height{34};
@@ -35,6 +41,10 @@ struct ShellConfig {
     std::string theme{"dark"};
     ThemeColors colors;
     std::vector<FrameSpec> frames;
+    std::map<std::string, ModuleOptions> modules;
+
+    // Modules disabled via `otakushell module disable` (state file override).
+    std::set<std::string> disabled;
 
     // Take-over of an existing shell running on the desktop.
     bool take_over{true};                         // disable an existing shell at startup
@@ -43,9 +53,30 @@ struct ShellConfig {
 };
 
 // Load configuration from a TOML file. Returns false on parse error.
+// Also applies the enable/disable state file (load_module_overrides).
 bool load_config(const std::string& path, ShellConfig& out);
 
 // Parse an anchor string ("top", "bottom", ...) into an Anchor.
 std::optional<Anchor> parse_anchor(const std::string& s);
+
+// Serialize module options to a "k=v&k=v" producer string.
+std::string serialize_module_options(const ModuleOptions& m);
+
+// -- Module enable/disable state (persisted override, not config.toml) ------
+
+// Path of the module state file (<state>/otakushell/modules.state).
+std::string module_state_path();
+
+// Read the currently disabled-module set from the state file.
+bool read_disabled_modules(std::set<std::string>& out);
+
+// Rewrite the whole disabled set (e.g. after `module enable/disable`).
+bool write_disabled_modules(const std::set<std::string>& disabled);
+
+// Enable (disable=false) or disable (disable=true) a module persistently.
+bool set_module_disabled(const std::string& name, bool disable);
+
+// Remove the disabled modules from every frame's `order`.
+void apply_module_overrides(ShellConfig& cfg);
 
 }  // namespace otaku

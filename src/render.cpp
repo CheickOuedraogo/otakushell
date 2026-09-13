@@ -2,6 +2,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
+
+#include <cairo.h>
+#include <pango/pangocairo.h>
 
 #include "otaku/wayland.hpp"
 
@@ -67,6 +71,88 @@ void render_background(ISurface& s, uint32_t argb, int radius) {
             p[x] = val;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Text (cairo / pangocairo)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct PangoGuard {
+    cairo_surface_t* cs = nullptr;
+    cairo_t* cr = nullptr;
+    ~PangoGuard() {
+        if (cr) cairo_destroy(cr);
+        if (cs) cairo_surface_destroy(cs);
+    }
+};
+
+PangoLayout* make_layout(cairo_t* cr, const std::string& font,
+                         const std::string& text) {
+    PangoLayout* lay = pango_cairo_create_layout(cr);
+    PangoFontDescription* desc = pango_font_description_from_string(font.c_str());
+    pango_layout_set_font_description(lay, desc);
+    pango_font_description_free(desc);
+    pango_layout_set_text(lay, text.c_str(), -1);
+    return lay;
+}
+
+// Creates a pango layout + measures ink extents, without touching a surface.
+void measure_text_impl(const std::string& font, const std::string& text,
+                       PangoRectangle* ink, PangoRectangle* log) {
+    PangoGuard g;
+    g.cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+    g.cr = cairo_create(g.cs);
+    PangoLayout* lay = make_layout(g.cr, font, text);
+    pango_layout_get_extents(lay, ink, log);
+    g_object_unref(lay);
+}
+
+}  // namespace
+
+int measure_text(const std::string& font, const std::string& text) {
+    if (text.empty()) return 0;
+    PangoRectangle ink{}, log{};
+    measure_text_impl(font, text, &ink, &log);
+    return static_cast<int>((ink.width + PANGO_SCALE / 2) / PANGO_SCALE);
+}
+
+std::pair<int, int> font_metrics(const std::string& font) {
+    PangoRectangle ink{}, log{};
+    measure_text_impl(font, "Ag", &ink, &log);
+    const int cell = static_cast<int>(log.height / PANGO_SCALE);
+    // Approximate ascent from the ink box: good enough for bar centering.
+    const int ascent =
+        static_cast<int>((ink.height > 0 ? ink.height + PANGO_SCALE / 2
+                                         : log.height + PANGO_SCALE) /
+                         PANGO_SCALE);
+    return {ascent, cell - ascent};
+}
+
+void render_text(ISurface& s, int x, int y, const std::string& font,
+                 const std::string& text, uint32_t argb) {
+    if (text.empty()) return;
+    uint32_t* px = static_cast<uint32_t*>(s.pixel_data());
+    if (!px) return;
+
+    PangoGuard g;
+    g.cs = cairo_image_surface_create_for_data(
+        reinterpret_cast<unsigned char*>(px), CAIRO_FORMAT_ARGB32, s.width(),
+        s.height(), s.stride());
+    g.cr = cairo_create(g.cs);
+
+    PangoLayout* lay = make_layout(g.cr, font, text);
+    cairo_move_to(g.cr, x, y);
+    cairo_set_source_rgba(
+        g.cr,
+        static_cast<double>((argb >> 16) & 0xff) / 255.0,
+        static_cast<double>((argb >> 8) & 0xff) / 255.0,
+        static_cast<double>(argb & 0xff) / 255.0,
+        static_cast<double>((argb >> 24) & 0xff) / 255.0);
+    pango_cairo_show_layout(g.cr, lay);
+    g_object_unref(lay);
+    cairo_surface_flush(g.cs);
 }
 
 }  // namespace otaku

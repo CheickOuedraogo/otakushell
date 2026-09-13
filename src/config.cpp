@@ -2,7 +2,14 @@
 
 #include <toml++/toml.hpp>
 
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <set>
+#include <sstream>
 #include <string>
+
+#include <unistd.h>
 
 namespace otaku {
 
@@ -92,7 +99,112 @@ bool load_config(const std::string& path, ShellConfig& out) {
         }
     }
 
+    out.modules.clear();
+    if (auto ms = tbl["modules"].as_table()) {
+        for (const auto& [mod_name, mod_node] : *ms) {
+            auto* opts = mod_node.as_table();
+            if (!opts) continue;
+            ModuleOptions mopts;
+            for (const auto& [key, val] : *opts) {
+                if (auto s = val.value<std::string>())
+                    mopts[std::string(key)] = *s;
+                else if (auto b = val.value<bool>())
+                    mopts[std::string(key)] = b ? std::string("true") : std::string("false");
+                else if (auto i = val.value<int>())
+                    mopts[std::string(key)] = std::to_string(*i);
+            }
+            out.modules[std::string(mod_name)] = std::move(mopts);
+        }
+    }
+
+    // Apply the `otakushell module enable|disable` state file.
+    read_disabled_modules(out.disabled);
+    apply_module_overrides(out);
     return true;
+}
+
+std::string serialize_module_options(const ModuleOptions& m) {
+    std::string out;
+    for (const auto& [k, v] : m) {
+        if (!out.empty()) out += '&';
+        out += k;
+        out += '=';
+        out += v;
+    }
+    return out;
+}
+
+std::string module_state_path() {
+    const char* xdg = getenv("XDG_STATE_HOME");
+    const char* home = getenv("HOME");
+    std::string base;
+    if (xdg && *xdg) {
+        base = xdg;
+    } else if (home && *home) {
+        base = std::string(home) + "/.local/state";
+    } else {
+        base = "/tmp";
+    }
+    return base + "/otakushell/modules.state";
+}
+
+bool read_disabled_modules(std::set<std::string>& out) {
+    out.clear();
+    toml::table tbl;
+    try {
+        tbl = toml::parse_file(module_state_path());
+    } catch (const toml::parse_error&) {
+        return false;  // no state yet → nothing disabled
+    }
+    if (auto dis = tbl["disabled"].as_array()) {
+        for (const auto& m : *dis)
+            if (auto s = m.value<std::string>()) out.insert(*s);
+    }
+    return true;
+}
+
+bool write_disabled_modules(const std::set<std::string>& disabled) {
+    const std::string path = module_state_path();
+    std::error_code ec;
+    std::filesystem::create_directories(
+        std::filesystem::path(path).parent_path(), ec);
+    if (ec) return false;
+
+    toml::table tbl;
+    toml::array arr;
+    for (const auto& d : disabled) arr.push_back(d);
+    tbl.insert("disabled", std::move(arr));
+
+    // Atomic write: temp file + rename.
+    const std::string tmp = path + ".tmp";
+    std::ofstream f(tmp, std::ios::trunc);
+    if (!f) return false;
+    f << tbl << "\n";
+    f.close();
+    if (!f) return false;
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+bool set_module_disabled(const std::string& name, bool disable) {
+    std::set<std::string> current;
+    read_disabled_modules(current);
+    if (disable) {
+        current.insert(name);
+    } else {
+        current.erase(name);
+    }
+    return write_disabled_modules(current);
+}
+
+void apply_module_overrides(ShellConfig& cfg) {
+    for (auto& frame : cfg.frames) {
+        auto& order = frame.order;
+        order.erase(std::remove_if(order.begin(), order.end(),
+                                   [&](const std::string& m) {
+                                       return cfg.disabled.count(m) > 0;
+                                   }),
+                    order.end());
+    }
 }
 
 }  // namespace otaku
