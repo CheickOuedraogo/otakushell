@@ -14,6 +14,7 @@
 #include "otaku/shm.hpp"
 #include "otaku/supervisor.hpp"
 #include "otaku/wayland.hpp"
+#include "otaku/settings.hpp"
 
 using namespace otaku;
 
@@ -24,9 +25,11 @@ void usage() {
         "\n"
         "usage:\n"
         "  otakushell preview [frame-id]    open a window previewing a frame\n"
+        "  otakushell settings              open the graphical settings editor\n"
         "  otakushell reload               hot-reload config\n"
         "  otakushell status               show active frames/modules\n"
         "  otakushell module enable|disable <name>\n"
+        "  otakushell lock | unlock         toggle the session lockscreen\n"
         "  otakushell exec <cmd>\n");
 }
 
@@ -50,6 +53,23 @@ int do_reload() {
         return 1;
     }
     std::printf("otakushell: signaled otakud (pid %d) to reload config\n", pid);
+    return 0;
+}
+
+int do_lock() {
+    int pid = 0;
+    if (!read_pidfile(pid)) {
+        std::fprintf(stderr,
+                     "otakushell: could not find otakud PID — is it running?\n");
+        return 1;
+    }
+    if (kill(pid, SIGUSR2) != 0) {
+        std::fprintf(stderr, "otakushell: failed to signal otakud (pid %d)\n",
+                     pid);
+        return 1;
+    }
+    std::printf("otakushell: signaled otakud (pid %d) to toggle the session lock\n",
+                pid);
     return 0;
 }
 
@@ -148,6 +168,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (cmd == "settings") {
+        return otaku::run_settings();
+    }
+
+    if (cmd == "lock" || cmd == "unlock") {
+        return do_lock();
+    }
+
     if (cmd == "reload") {
         return do_reload();
     }
@@ -168,6 +196,10 @@ int main(int argc, char** argv) {
         std::printf("otakud status\n");
         std::printf("  version : %s\n", st->version);
         std::printf("  frames  : %u\n", st->frame_count);
+        const char* lock_str = st->lock_state == kLockActive   ? "locked"
+                               : st->lock_state == kLockPending ? "pending"
+                                                                : "off";
+        std::printf("  lock    : %s\n", lock_str);
         const uint32_t n = st->module_count.load(std::memory_order_relaxed);
         std::printf("  modules : %u\n", n);
         for (uint32_t i = 0; i < n; ++i)

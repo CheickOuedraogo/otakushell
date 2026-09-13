@@ -32,6 +32,11 @@ public:
 
     int preferred_width() const override { return 0; }  // layout uses render()
 
+    int measure(const RenderContext& ctx) const override {
+        const int w = measure_text(ctx.font, current_text_());
+        return w > 0 ? w + kSpacing : 0;
+    }
+
     int render(ISurface& s, const RenderContext& ctx) override {
         const std::string text = current_text_();
         const int w = measure_text(ctx.font, text);

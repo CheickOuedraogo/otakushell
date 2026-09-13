@@ -39,6 +39,11 @@ public:
 
     void render();
 
+    // True once the backing surface holds a sized, allocated buffer (i.e. it
+    // has been configured and can be presented). Used by the lockscreen to
+    // verify every lock surface is really paintable before trusting the lock.
+    bool ready() const;
+
 private:
     FrameSpec spec_;
     ThemeColors theme_;

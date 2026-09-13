@@ -3,6 +3,10 @@
 #include <toml++/toml.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -40,6 +44,49 @@ Color to_color(const std::string& hex, float alpha = 1.0f) {
         c.b = byte(5) / 255.0f;
     }
     return c;
+}
+
+std::string to_hex(const Color& c) {
+    auto byte = [](float v) -> int {
+        const int b = static_cast<int>(v * 255.0f + 0.5f);
+        return std::clamp(b, 0, 255);
+    };
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "#%02x%02x%02x", byte(c.r), byte(c.g),
+                  byte(c.b));
+    return buf;
+}
+
+// Serialize an option value back as the typed TOML scalar it was loaded from
+// (bool / int / string). Prevents "interval_ms = 2000" from regressing into a
+// quoted string on every save.
+void insert_option(toml::table& mo, const std::string& key, const std::string& v) {
+    std::string lo = v;
+    for (auto& ch : lo) ch = static_cast<char>(std::tolower(ch));
+    if (lo == "true" || lo == "false") {
+        mo.insert(key, toml::value<bool>(lo == "true"));
+        return;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const long long i = std::strtoll(v.c_str(), &end, 10);
+    if (errno == 0 && end && *end == '\0' && end != v.c_str()) {
+        mo.insert(key, toml::value<int64_t>(i));
+        return;
+    }
+    mo.insert(key, toml::value<std::string>(v));
+}
+
+const char* anchor_str(Anchor a) {
+    switch (a) {
+        case Anchor::Top: return "top";
+        case Anchor::Bottom: return "bottom";
+        case Anchor::Left: return "left";
+        case Anchor::Right: return "right";
+        case Anchor::Full: return "full";
+        case Anchor::None: return "none";
+    }
+    return "none";
 }
 
 }  // namespace
@@ -106,12 +153,18 @@ bool load_config(const std::string& path, ShellConfig& out) {
             if (!opts) continue;
             ModuleOptions mopts;
             for (const auto& [key, val] : *opts) {
-                if (auto s = val.value<std::string>())
+                // Check scalar types explicitly: `value<bool>()` silently
+                // converts any non-zero integer to true, so never rely on
+                // implicit conversions when round-tripping module options.
+                if (val.is_boolean())
+                    mopts[std::string(key)] =
+                        val.as_boolean()->get() ? std::string("true")
+                                                : std::string("false");
+                else if (val.is_integer())
+                    mopts[std::string(key)] =
+                        std::to_string(val.as_integer()->get());
+                else if (auto s = val.value<std::string>())
                     mopts[std::string(key)] = *s;
-                else if (auto b = val.value<bool>())
-                    mopts[std::string(key)] = b ? std::string("true") : std::string("false");
-                else if (auto i = val.value<int>())
-                    mopts[std::string(key)] = std::to_string(*i);
             }
             out.modules[std::string(mod_name)] = std::move(mopts);
         }
@@ -205,6 +258,65 @@ void apply_module_overrides(ShellConfig& cfg) {
                                    }),
                     order.end());
     }
+}
+
+bool save_config(const std::string& path, const ShellConfig& cfg) {
+    toml::table shell;
+    shell.insert("monitor", toml::value<std::string>(cfg.monitor));
+    shell.insert("height", toml::value<int64_t>(cfg.height));
+    shell.insert("font", toml::value<std::string>(cfg.font));
+    shell.insert("theme", toml::value<std::string>(cfg.theme));
+    shell.insert("take_over", toml::value<bool>(cfg.take_over));
+    shell.insert("take_over_dry_run", toml::value<bool>(cfg.take_over_dry_run));
+    toml::array kill;
+    for (const auto& k : cfg.take_over_kill) kill.push_back(k);
+    shell.insert("take_over_kill", std::move(kill));
+
+    toml::table colors;
+    colors.insert("background", toml::value<std::string>(to_hex(cfg.colors.background)));
+    colors.insert("foreground", toml::value<std::string>(to_hex(cfg.colors.foreground)));
+    colors.insert("accent", toml::value<std::string>(to_hex(cfg.colors.accent)));
+    colors.insert("muted", toml::value<std::string>(to_hex(cfg.colors.muted)));
+    toml::table theme;
+    theme.insert("colors", std::move(colors));
+
+    toml::array frames;
+    for (const auto& f : cfg.frames) {
+        toml::table ft;
+        ft.insert("id", toml::value<std::string>(f.id));
+        ft.insert("anchor", toml::value<std::string>(anchor_str(f.anchor)));
+        if (f.exclusive) ft.insert("exclusive_zone", toml::value<bool>(true));
+        if (f.hidden) ft.insert("hidden", toml::value<std::string>("auto"));
+        if (f.lock) ft.insert("lock", toml::value<bool>(true));
+        toml::array order;
+        for (const auto& m : f.order) order.push_back(m);
+        ft.insert("order", std::move(order));
+        frames.push_back(std::move(ft));
+    }
+
+    toml::table mods;
+    for (const auto& [name, opts] : cfg.modules) {
+        toml::table mo;
+        for (const auto& [k, v] : opts) insert_option(mo, k, v);
+        mods.insert(name, std::move(mo));
+    }
+
+    toml::table root;
+    root.insert("shell", std::move(shell));
+    root.insert("theme", std::move(theme));
+    root.insert("frame", std::move(frames));
+    root.insert("modules", std::move(mods));
+
+    // Atomic write (temp file + rename) so a crash never leaves a partial
+    // config behind. Note: re-serializing loses the original inline comments;
+    // the settings UI takes over as the visual editor.
+    const std::string tmp = path + ".tmp";
+    std::ofstream f(tmp, std::ios::trunc);
+    if (!f) return false;
+    f << root << "\n";
+    f.close();
+    if (!f) return false;
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
 }
 
 }  // namespace otaku

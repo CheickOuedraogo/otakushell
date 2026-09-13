@@ -87,6 +87,11 @@ constexpr size_t kStatusRegionSize = 4096;
 constexpr uint32_t kStatusMaxModules = 16;
 constexpr uint32_t kStatusMagic = 0x4F545354u;  // "OTST"
 
+// Session lockscreen state written with frame_count/magic by the daemon.
+constexpr uint32_t kLockOff = 0;       // no lock in progress
+constexpr uint32_t kLockPending = 1;   // lock requested, not confirmed yet
+constexpr uint32_t kLockActive = 2;    // compositor confirmed `locked`
+
 struct StatusEntry {
     char name[48]{0};
     pid_t pid{-1};
@@ -97,6 +102,7 @@ struct alignas(64) StatusRegion {
     char version[24]{0};
     uint64_t start_ns{0};
     uint32_t frame_count{0};
+    uint32_t lock_state{0};
     std::atomic<uint32_t> module_count{0};
     StatusEntry modules[kStatusMaxModules];
 };

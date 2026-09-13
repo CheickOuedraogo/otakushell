@@ -14,6 +14,7 @@
 #include "otaku/frame.hpp"
 #include "otaku/hypr.hpp"
 #include "otaku/render.hpp"
+#include "otaku/session_lock.hpp"
 #include "otaku/shm.hpp"
 #include "otaku/supervisor.hpp"
 #include "otaku/wayland.hpp"
@@ -24,10 +25,15 @@ namespace {
 
 volatile std::sig_atomic_t g_running = 1;
 volatile std::sig_atomic_t g_reload = 0;  // set by SIGUSR1 (hot-reload)
+volatile std::sig_atomic_t g_lock_toggle = 0;  // set by SIGUSR2 (session lock)
 
 void on_signal(int sig) {
     if (sig == SIGUSR1) {
         g_reload = 1;
+        return;
+    }
+    if (sig == SIGUSR2) {
+        g_lock_toggle = 1;
         return;
     }
     g_running = 0;
@@ -65,9 +71,15 @@ void status_reset(const char* version, uint64_t start_ns) {
 }
 
 void status_update(const std::vector<std::unique_ptr<Frame>>& frames,
-                   const ModuleSupervisor& sup) {
+                   const SessionLock* lock, const ModuleSupervisor& sup) {
     if (!g_status) return;
-    g_status->frame_count = static_cast<uint32_t>(frames.size());
+    const size_t extra = lock ? lock->frames().size() : 0;
+    g_status->frame_count =
+        static_cast<uint32_t>(frames.size() + extra);
+    g_status->lock_state = lock ? (lock->locked()   ? kLockActive
+                                   : lock->pending() ? kLockPending
+                                                     : kLockOff)
+                                : kLockOff;
 
     const auto entries = sup.entries();
     const uint32_t n = static_cast<uint32_t>(
@@ -129,6 +141,7 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
     std::signal(SIGUSR1, on_signal);
+    std::signal(SIGUSR2, on_signal);
     std::signal(SIGSEGV, on_fatal);
     std::signal(SIGABRT, on_fatal);
     std::printf("otakud: starting, pid %d\n", static_cast<int>(getpid()));
@@ -146,10 +159,20 @@ int main(int argc, char** argv) {
     if (frames.empty())
         std::fprintf(stderr, "otakud: warning: no anchored frames were declared\n");
 
+    // Session lockscreen: only active when a `lock = true` frame is declared
+    // and the compositor exposes ext-session-lock. Nothing happens until
+    // `otakushell lock` (SIGUSR2) arrives.
+    auto lock = std::make_unique<SessionLock>(d, cfg, supervisor, outputs);
+    if (lock->available())
+        std::printf("otakud: lockscreen ready (`otakushell lock`)\n");
+    else
+        std::printf("otakud: no lockscreen frame declared or unsupported\n");
+
     // Rebuild a fresh set of frames from the current config + theme.
     const auto apply_frames = [&]() {
         frames.clear();  // destroys old layer surfaces
         frames = build_frames(d, supervisor, cfg, outputs);
+        lock = std::make_unique<SessionLock>(d, cfg, supervisor, outputs);
         wl_display_roundtrip(d.display);
         for (auto& f : frames) f->render();
         wl_display_flush(d.display);
@@ -181,6 +204,23 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Toggle the session lockscreen (SIGUSR2 from `otakushell lock`).
+        if (g_lock_toggle) {
+            g_lock_toggle = 0;
+            if (!lock->available()) {
+                std::fprintf(stderr,
+                             "otakud: no lockscreen frame declared in config\n");
+            } else if (lock->locked()) {
+                lock->unlock();
+            } else if (lock->pending()) {
+                // Lock requested but not confirmed yet: cancel it cleanly
+                // instead of stacking another lock request.
+                lock->abort();
+            } else {
+                lock->lock();
+            }
+        }
+
         // Modules: drain producer rings and repaint once a second at most.
         const uint64_t now = mono_ns();
         supervisor.poll_all(now);
@@ -188,7 +228,7 @@ int main(int argc, char** argv) {
             supervisor.reap();
             last_reap = now;
         }
-        status_update(frames, supervisor);
+        status_update(frames, lock.get(), supervisor);
 
         // Repaint every ~500 ms so clock/sysinfo values stay fresh.
         const int wait_ms = 100;
@@ -197,6 +237,7 @@ int main(int argc, char** argv) {
             if (now - last_paint >= 500'000'000ull) {
                 last_paint = now;
                 for (auto& f : frames) f->render();
+                for (auto& f : lock->frames()) f->render();
                 wl_display_flush(d.display);
             }
         }
@@ -204,6 +245,7 @@ int main(int argc, char** argv) {
         if (!display_wait(d, wait_ms)) break;
     }
 
+    lock.reset();  // close any active lock before tearing down the display
     supervisor.shutdown();
     status_clear();
     remove_pidfile();

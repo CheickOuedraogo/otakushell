@@ -56,6 +56,10 @@ struct ShellConfig {
 // Also applies the enable/disable state file (load_module_overrides).
 bool load_config(const std::string& path, ShellConfig& out);
 
+// Serialize `cfg` back to a TOML file (atomic write via tmp+rename). Used by
+// the settings UI. Re-serialization drops the original inline comments.
+bool save_config(const std::string& path, const ShellConfig& cfg);
+
 // Parse an anchor string ("top", "bottom", ...) into an Anchor.
 std::optional<Anchor> parse_anchor(const std::string& s);
 

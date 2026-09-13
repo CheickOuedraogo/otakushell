@@ -37,6 +37,11 @@ public:
 
     // Optional width hint used by the layout before first render.
     virtual int preferred_width() const = 0;
+
+    // Same as render() but purely measuring: the pixel width this module
+    // would occupy (including trailing spacing), without drawing anything.
+    // Used by the layout to center a row (lockscreen).
+    virtual int measure(const RenderContext& ctx) const = 0;
 };
 
 // Factory: create a module by name, backed by the supervisor's producer.

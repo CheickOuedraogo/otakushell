@@ -15,6 +15,10 @@ void render_background(ISurface& s, uint32_t argb, int radius);
 // Fills a horizontal strip of `height` px starting at `y` with `argb`.
 void render_fill_strip(ISurface& s, int y, int height, uint32_t argb);
 
+// Solid rectangle fill, clipped to the surface bounds. Used by the settings
+// window (rows, swatches, buttons, sliders).
+void render_rect(ISurface& s, int x, int y, int w, int h, uint32_t argb);
+
 // --- Text (cairo / pangocairo) ----------------------------------------------
 
 // Measures the pixel width of `text` laid out with the pango font description

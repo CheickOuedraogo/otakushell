@@ -53,11 +53,21 @@ void Frame::render() {
     if (surface_->visible()) {
         render_background(*surface_, color_to_argb(theme_.background), 10);
 
-        // Horizontal module layout, left-aligned with small padding.
+        // Horizontal module layout, left-aligned with small padding. The
+        // lockscreen (spec.lock) centers the row on the monitor instead.
         constexpr int kPadX = 14;
-        int x = kPadX;
         const uint32_t fg = color_to_argb(theme_.foreground);
         const int h = surface_->height();
+        int x = kPadX;
+        if (spec_.lock) {
+            RenderContext mctx;
+            mctx.font = font_;
+            mctx.fg = fg;
+            mctx.height = h;
+            int total = 0;
+            for (auto& m : modules_) total += m->measure(mctx);
+            x = std::max(kPadX, (surface_->width() - total) / 2);
+        }
         for (auto& m : modules_) {
             RenderContext ctx;
             ctx.font = font_;
@@ -71,6 +81,11 @@ void Frame::render() {
         render_fill_strip(*surface_, 0, surface_->height(), 0u);
     }
     surface_->present();
+}
+
+bool Frame::ready() const {
+    return surface_ && surface_->width() > 0 && surface_->height() > 0 &&
+           surface_->pixel_data() != nullptr;
 }
 
 std::vector<std::unique_ptr<Frame>> build_frames(Display& d,

@@ -259,6 +259,8 @@ public:
 
     bool visible() const override { return auto_hide_ ? visible_ : true; }
 
+    wl_surface* native_surface() const override { return wl_surface_; }
+
     // Auto-hide: show the full edge (with exclusive zone) or collapse to the
     // 1px trigger strip (no exclusive zone). A no-op unless auto_hide_.
     void set_visible(bool v) override {
@@ -378,6 +380,8 @@ public:
     bool visible() const override { return true; }
     void set_visible(bool) override { /* windows are always visible */ }
 
+    wl_surface* native_surface() const override { return wl_surface_; }
+
 private:
     static void handle_surface_configure(void* data, xdg_surface*, uint32_t serial) {
         auto* self = static_cast<ToplevelSurface*>(data);
@@ -414,25 +418,132 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Seat / pointer tracking (used by auto-hide edges)
+// Session-lock surface implementation (one per output, exactly covers it).
+// Used by the lockscreen frame (ext-session-lock). The surface must not
+// commit anything before its first configure event, so the constructor only
+// creates the objects; the first commit happens in render() after configure.
 // ---------------------------------------------------------------------------
-void pointer_enter(void*, wl_pointer*, uint32_t, wl_surface* surface, wl_fixed_t,
-                   wl_fixed_t) {
+class LockSurface final : public ISurface {
+public:
+    LockSurface(Display& d, const Output& out, ext_session_lock_v1* lock)
+        : display_(d) {
+        shm_.compositor = d.compositor;
+        shm_.shm = d.shm;
+        wl_surface_ = wl_compositor_create_surface(d.compositor);
+        wl_output* output = static_cast<wl_output*>(wl_registry_bind(
+            d.registry, out.name, &wl_output_interface, 1));
+        lock_surface_ = ext_session_lock_v1_get_lock_surface(lock, wl_surface_,
+                                                             output);
+ext_session_lock_surface_v1_add_listener(lock_surface_,
+                                                  &lock_listener_, this);
+        // intentionally no commit before the first configure
+    }
+
+    ~LockSurface() override {
+        if (display_.alive) {
+            if (lock_surface_) ext_session_lock_surface_v1_destroy(lock_surface_);
+            if (wl_surface_) wl_surface_destroy(wl_surface_);
+        }
+        shm_.destroy(display_.alive);
+    }
+
+    void set_size(int32_t width, int32_t height) override {
+        if (shm_.create(width, height)) present();
+    }
+
+    void present() override {
+        if (!wl_surface_ || !shm_.data[0]) return;
+        wl_surface_attach(wl_surface_, shm_.buffers[shm_.front], 0, 0);
+        wl_surface_damage_buffer(wl_surface_, 0, 0, INT32_MAX, INT32_MAX);
+        wl_surface_commit(wl_surface_);
+        shm_.front = (shm_.front + 1) % 2;
+    }
+
+    int32_t width() const override { return shm_.w; }
+    int32_t height() const override { return shm_.h; }
+    wl_buffer* buffer() const override { return shm_.buffers[shm_.front]; }
+    void* pixel_data() override { return shm_.data[shm_.front]; }
+    size_t buffer_size() const override { return shm_.size; }
+    int32_t stride() const override { return static_cast<int32_t>(shm_.stride); }
+
+    bool visible() const override { return true; }
+    void set_visible(bool) override { /* lock surfaces are always visible */ }
+
+private:
+    static void handle_configure(void* data, ext_session_lock_surface_v1*, 
+                                 uint32_t serial, uint32_t w, uint32_t h) {
+        auto* self = static_cast<LockSurface*>(data);
+        ext_session_lock_surface_v1_ack_configure(self->lock_surface_, serial);
+        // The lock surface must match the acked size exactly; owner redraws
+        // (first real commit happens here, after the ack).
+        if (self->shm_.data[0]) self->shm_.destroy();
+        if (!self->shm_.create(static_cast<int32_t>(w), static_cast<int32_t>(h))) {
+            std::fprintf(stderr,
+                         "lock: could not allocate %ux%u shm buffer — session "
+                         "will NOT be locked\n",
+                         w, h);
+            return;
+        }
+        if (self->on_resize) self->on_resize();
+    }
+
+    static constexpr ext_session_lock_surface_v1_listener lock_listener_ = {
+        handle_configure};
+
+    Display& display_;
+    ext_session_lock_surface_v1* lock_surface_{nullptr};
+    wl_surface* wl_surface_{nullptr};
+    ShmSurface shm_{};
+};
+
+// ---------------------------------------------------------------------------
+// Seat / pointer tracking (used by auto-hide edges AND clickable windows such
+// as the settings UI). Position is tracked whenever the pointer is over any
+// of our surfaces; button handlers read the last tracked position.
+// ---------------------------------------------------------------------------
+void pointer_enter(void* data, wl_pointer*, uint32_t, wl_surface* surface,
+                   wl_fixed_t sx, wl_fixed_t sy) {
+    auto* d = static_cast<Display*>(data);
+    d->ptr_surface = surface;
+    d->ptr_x = sx;
+    d->ptr_y = sy;
     for (const auto& e : g_edge_registry) {
         if (e.wl_surf == surface) {
             e.surf->set_visible(true);
             break;
         }
     }
+    if (d->on_pointer_enter) d->on_pointer_enter(surface, true);
 }
 
-void pointer_leave(void*, wl_pointer*, uint32_t, wl_surface* surface) {
+void pointer_leave(void* data, wl_pointer*, uint32_t, wl_surface* surface) {
+    auto* d = static_cast<Display*>(data);
+    d->ptr_surface = nullptr;
     for (const auto& e : g_edge_registry) {
         if (e.wl_surf == surface) {
             e.surf->set_visible(false);
             break;
         }
     }
+    if (d->on_pointer_enter) d->on_pointer_enter(surface, false);
+}
+
+void pointer_motion(void* data, wl_pointer*, uint32_t, wl_fixed_t sx,
+                    wl_fixed_t sy) {
+    auto* d = static_cast<Display*>(data);
+    d->ptr_x = sx;
+    d->ptr_y = sy;
+    if (d->on_pointer_motion && d->ptr_surface)
+        d->on_pointer_motion(d->ptr_surface, wl_fixed_to_int(sx),
+                             wl_fixed_to_int(sy));
+}
+
+void pointer_button(void* data, wl_pointer*, uint32_t, uint32_t, uint32_t button,
+                    uint32_t state) {
+    auto* d = static_cast<Display*>(data);
+    if (d->on_pointer_button && d->ptr_surface)
+        d->on_pointer_button(d->ptr_surface, button, state,
+                             wl_fixed_to_int(d->ptr_x), wl_fixed_to_int(d->ptr_y));
 }
 
 // wl_pointer version 1: only the first five events exist. The full listener
@@ -441,8 +552,8 @@ void pointer_leave(void*, wl_pointer*, uint32_t, wl_surface* surface) {
 static constexpr wl_pointer_listener g_pointer_listener = {
     pointer_enter,
     pointer_leave,
-    [](void*, wl_pointer*, uint32_t, wl_fixed_t, wl_fixed_t) {},  // motion
-    [](void*, wl_pointer*, uint32_t, uint32_t, uint32_t, uint32_t) {},  // button
+    pointer_motion,
+    pointer_button,
     [](void*, wl_pointer*, uint32_t, uint32_t, wl_fixed_t) {},  // axis
     nullptr,   // frame
     nullptr,   // axis_source
@@ -453,11 +564,43 @@ static constexpr wl_pointer_listener g_pointer_listener = {
     nullptr,   // warp
 };
 
-// Bind the seat's pointer if the compositor has one. The capabilities event
-// is already queued (delivered by the roundtrip below), so the pointer is
-// created synchronously.
-void init_seat_pointer(Display& d) {
-    if (!d.seat || d.pointer) return;
+// ---------------------------------------------------------------------------
+// Keyboard listeners (used by the lockscreen: the compositor gives one of the
+// lock surfaces keyboard focus, so key events reach on_key while locked).
+// The settings window also uses them for its text fields.
+// ---------------------------------------------------------------------------
+void keyboard_keymap(void*, wl_keyboard*, uint32_t, int32_t fd, uint32_t) {
+    close(fd);  // we don't need the keymap; keys are matched on keycode
+}
+
+void keyboard_key(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t key,
+                  uint32_t state) {
+    auto* d = static_cast<Display*>(data);
+    if (d->on_key) d->on_key(key, state);
+}
+
+void keyboard_modifiers(void* data, wl_keyboard*, uint32_t, uint32_t depressed,
+                        uint32_t, uint32_t, uint32_t) {
+    auto* d = static_cast<Display*>(data);
+    d->kbd_mods = depressed;
+}
+
+// wl_keyboard version 1: the first five events exist; the rest are never
+// fired at the version we bind but the listener is kept warning-free.
+static constexpr wl_keyboard_listener g_keyboard_listener = {
+    keyboard_keymap,
+    [](void*, wl_keyboard*, uint32_t, wl_surface*, wl_array*) {},  // enter
+    [](void*, wl_keyboard*, uint32_t, wl_surface*) {},  // leave
+    keyboard_key,
+    keyboard_modifiers,
+    nullptr,   // repeat_info
+};
+
+// Bind the seat's pointer and keyboard if the compositor provides them. The
+// capabilities event is already queued (delivered by the roundtrip below), so
+// the devices are created synchronously.
+void init_seat_devices(Display& d) {
+    if (!d.seat) return;
     static const wl_seat_listener seat_listener = {
         [](void* data, wl_seat* seat, uint32_t capabilities) {
             auto* dd = static_cast<Display*>(data);
@@ -467,6 +610,13 @@ void init_seat_pointer(Display& d) {
             } else if (!(capabilities & WL_SEAT_CAPABILITY_POINTER) && dd->pointer) {
                 wl_pointer_destroy(dd->pointer);
                 dd->pointer = nullptr;
+            }
+            if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !dd->keyboard) {
+                dd->keyboard = wl_seat_get_keyboard(seat);
+                wl_keyboard_add_listener(dd->keyboard, &g_keyboard_listener, dd);
+            } else if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && dd->keyboard) {
+                wl_keyboard_destroy(dd->keyboard);
+                dd->keyboard = nullptr;
             }
         },
         nullptr  // name (seat v2+, not fired at the v1 we bound)
@@ -502,7 +652,7 @@ bool display_connect(Display& d, std::vector<Output>* outputs, std::string& err,
         err = "compositor does not expose xdg-shell";
     if (!err.empty()) return false;
 
-    init_seat_pointer(d);
+    init_seat_devices(d);
     return true;
 }
 
@@ -575,6 +725,12 @@ std::unique_ptr<ISurface> create_toplevel_surface(Display& d, std::string title,
                                                   std::atomic<bool>* close_flag) {
     return std::make_unique<ToplevelSurface>(d, std::move(title), width, height,
                                              close_flag);
+}
+
+std::unique_ptr<ISurface> create_lock_surface(Display& d, const Output& output,
+                                              ext_session_lock_v1* lock,
+                                              const std::string&) {
+    return std::make_unique<LockSurface>(d, output, lock);
 }
 
 }  // namespace otaku

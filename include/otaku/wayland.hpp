@@ -55,6 +55,10 @@ public:
     // Called by the surface implementation after a size/visibility change so
     // the owner (the Frame) can redraw the new buffer. May be null.
     std::function<void()> on_resize;
+
+    // The underlying wl_surface proxy (nullptr until attached). Lets owners
+    // compare against pointer events to know if the pointer is over them.
+    virtual wl_surface* native_surface() const { return nullptr; }
 };
 
 // The Wayland client context shared by all surfaces.
@@ -70,6 +74,28 @@ struct Display {
     ext_session_lock_manager_v1* session_lock{nullptr};
     wl_seat* seat{nullptr};      // bound if the compositor has one
     wl_pointer* pointer{nullptr};  // created when the seat has pointer capability
+    wl_keyboard* keyboard{nullptr};  // created when the seat has keyboard capability
+
+    // Called on wl_keyboard key events (keycode, WL_KEYBOARD_KEY_STATE_*).
+    // Used by the lockscreen to unlock on Escape/Return; bars never get
+    // keyboard focus so this stays quiet in normal operation. May be empty.
+    std::function<void(uint32_t keycode, uint32_t state)> on_key;
+
+    // Modifier mask of the most recent wl_keyboard modifiers event (bit 0 =
+    // shift on standard layouts). Only meaningful while a key event arrives.
+    uint32_t kbd_mods{0};
+
+    // Last known pointer position (surface-relative, wl_fixed) and the
+    // surface the pointer is currently over (nullptr once it leaves).
+    wl_surface* ptr_surface{nullptr};
+    wl_fixed_t ptr_x{0}, ptr_y{0};
+
+    // Mouse events bracketed to the surface under the pointer. Coordinates
+    // are pixel offsets into that surface. May be empty.
+    std::function<void(wl_surface* surface, int x, int y)> on_pointer_motion;
+    std::function<void(wl_surface* surface, bool entered)> on_pointer_enter;
+    std::function<void(wl_surface* surface, uint32_t button, uint32_t state, int x,
+                       int y)> on_pointer_button;
 };
 
 // Connect to the Wayland display, bind globals, collect outputs (if `out`
@@ -107,5 +133,14 @@ std::unique_ptr<ISurface> create_layer_surface(Display& d,
 std::unique_ptr<ISurface> create_toplevel_surface(Display& d, std::string title,
                                                   int32_t width, int32_t height,
                                                   std::atomic<bool>* close_flag);
+
+// Create a session-lock surface (one per output, exactly covering the output)
+// for the given lock object. Used by the lockscreen (ext-session-lock).
+// The surface commits its first (buffer) only after the compositor's
+// configure event (acking it), as the protocol requires. `spec_id` is the
+// lockscreen frame id, kept for the namespace on the surface.
+std::unique_ptr<ISurface> create_lock_surface(Display& d, const Output& output,
+                                              ext_session_lock_v1* lock,
+                                              const std::string& spec_id);
 
 }  // namespace otaku

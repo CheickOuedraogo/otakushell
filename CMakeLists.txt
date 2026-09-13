@@ -67,7 +67,9 @@ add_library(otaku_core STATIC
   src/frame.cpp
   src/module.cpp
   src/supervisor.cpp
+  src/session_lock.cpp
   src/hypr.cpp
+  src/settings.cpp
   ${PROTOCOL_GEN_DIR}/wlr-layer-shell-protocol.c
   ${PROTOCOL_GEN_DIR}/xdg-shell-protocol.c
   ${PROTOCOL_GEN_DIR}/xdg-output-protocol.c

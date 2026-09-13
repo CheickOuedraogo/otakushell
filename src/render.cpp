@@ -30,6 +30,28 @@ void render_fill_strip(ISurface& s, int y, int strip_h, uint32_t argb) {
     }
 }
 
+// Solid rectangle fill clipped to the surface bounds.
+void render_rect(ISurface& s, int x, int y, int w, int h, uint32_t argb) {
+    const int sw = s.width();
+    const int sh = s.height();
+    if (sw <= 0 || sh <= 0) return;
+    uint32_t* px = static_cast<uint32_t*>(s.pixel_data());
+    if (!px) return;
+
+    const int x0 = std::max(0, x);
+    const int y0 = std::max(0, y);
+    const int x1 = std::min(sw, x + w);
+    const int y1 = std::min(sh, y + h);
+    if (x0 >= x1 || y0 >= y1) return;
+
+    const size_t row_words = static_cast<size_t>(s.stride()) / 4;
+    const int rw = x1 - x0;
+    for (int row = y0; row < y1; ++row) {
+        uint32_t* p = px + row * row_words + x0;
+        for (int i = 0; i < rw; ++i) p[i] = argb;
+    }
+}
+
 void render_background(ISurface& s, uint32_t argb, int radius) {
     const int w = s.width();
     const int h = s.height();
