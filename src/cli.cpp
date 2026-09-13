@@ -2,13 +2,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 
 #include <csignal>
+#include <unistd.h>
 
 #include "otaku/config.hpp"
 #include "otaku/frame.hpp"
 #include "otaku/hypr.hpp"
+#include "otaku/shm.hpp"
+#include "otaku/supervisor.hpp"
 #include "otaku/wayland.hpp"
 
 using namespace otaku;
@@ -25,6 +29,30 @@ void usage() {
         "  otakushell module enable|disable <name>\n"
         "  otakushell exec <cmd>\n");
 }
+
+uint64_t mono_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ull +
+           static_cast<uint64_t>(ts.tv_nsec);
+}
+
+int do_reload() {
+    int pid = 0;
+    if (!read_pidfile(pid)) {
+        std::fprintf(stderr,
+                     "otakushell: could not find otakud PID — is it running?\n");
+        return 1;
+    }
+    if (kill(pid, SIGUSR1) != 0) {
+        std::fprintf(stderr, "otakushell: failed to signal otakud (pid %d)\n",
+                     pid);
+        return 1;
+    }
+    std::printf("otakushell: signaled otakud (pid %d) to reload config\n", pid);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -92,8 +120,10 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        ModuleSupervisor supervisor(/*simulate=*/true);  // mocked data
         Frame frame(*fspec);
         frame.set_theme(cfg.colors);
+        frame.attach_modules(supervisor, cfg);
         frame.set_surface(std::move(surf));
 
         // Let the compositor deliver the initial configure, then first frame.
@@ -105,34 +135,97 @@ int main(int argc, char** argv) {
                     fspec->id.c_str(),
                     horizontal ? "top/bottom bar" : "side edge");
         std::printf("otakushell: close the window to quit.\n");
+        std::fflush(stdout);
 
         while (alive.load()) {
+            supervisor.poll_all(mono_ns());
             if (!display_wait(d, 100)) break;
         }
 
+        supervisor.shutdown();
         display_disconnect(d);
         std::printf("otakushell preview: bye\n");
         return 0;
     }
 
     if (cmd == "reload") {
-        int pid = 0;
-        if (!read_pidfile(pid)) {
-            std::fprintf(stderr,
-                         "otakushell: could not find otakud PID — is it running?\n");
+        return do_reload();
+    }
+
+    if (cmd == "status") {
+        void* region = shm_open_region("status", kStatusRegionSize,
+                                       /*create=*/false);
+        if (!region) {
+            std::printf("otakushell: otakud is not running.\n");
             return 1;
         }
-        if (kill(pid, SIGUSR1) != 0) {
-            std::fprintf(stderr, "otakushell: failed to signal otakud (pid %d)\n",
-                         pid);
+        const StatusRegion* st = static_cast<const StatusRegion*>(region);
+        if (st->magic.load(std::memory_order_relaxed) != kStatusMagic) {
+            std::printf("otakushell: no daemon status available (stale region).\n");
+            shm_close_region(region, kStatusRegionSize, "status", /*unlink=*/false);
             return 1;
         }
-        std::printf("otakushell: signaled otakud (pid %d) to reload config\n", pid);
+        std::printf("otakud status\n");
+        std::printf("  version : %s\n", st->version);
+        std::printf("  frames  : %u\n", st->frame_count);
+        const uint32_t n = st->module_count.load(std::memory_order_relaxed);
+        std::printf("  modules : %u\n", n);
+        for (uint32_t i = 0; i < n; ++i)
+            std::printf("    - %-16s pid %d\n", st->modules[i].name,
+                        st->modules[i].pid);
+        shm_close_region(region, kStatusRegionSize, "status", /*unlink=*/false);
         return 0;
     }
 
-    if (cmd == "status" || cmd == "exec" || cmd == "module") {
-        std::printf("otakushell: '%s' is not implemented yet.\n", cmd.c_str());
+    if (cmd == "module") {
+        if (argc < 4) {
+            usage();
+            return 1;
+        }
+        const std::string action = argv[2];
+        const std::string name = argv[3];
+        const bool disable = action == "disable";
+        const bool enable = action == "enable";
+        if (!enable && !disable) {
+            std::fprintf(stderr, "otakushell: expected 'enable' or 'disable'\n");
+            return 1;
+        }
+
+        std::string cfg_path = getenv("OTAKU_CONFIG") ? getenv("OTAKU_CONFIG")
+                                                      : "config.toml";
+        ShellConfig cfg;
+        if (!load_config(cfg_path, cfg)) {
+            std::fprintf(stderr, "otakushell: could not load '%s'\n", cfg_path.c_str());
+            return 1;
+        }
+
+        bool known = cfg.modules.count(name) > 0;
+        for (const auto& f : cfg.frames) {
+            for (const auto& m : f.order)
+                if (m == name) known = true;
+        }
+        if (!known) {
+            std::fprintf(stderr, "otakushell: unknown module '%s'\n", name.c_str());
+            return 1;
+        }
+
+        if (!set_module_disabled(name, disable)) {
+            std::fprintf(stderr, "otakushell: could not update module state file\n");
+            return 1;
+        }
+        std::printf("otakushell: module '%s' %s\n", name.c_str(),
+                    disable ? "disabled" : "enabled");
+        // Apply the change live if the daemon is running.
+        int pid = 0;
+        if (read_pidfile(pid)) {
+            kill(pid, SIGUSR1);
+            std::printf("otakushell: signaled otakud (pid %d) to reload\n", pid);
+        }
+        return 0;
+    }
+
+    if (cmd == "exec") {
+        std::fprintf(stderr, "otakushell: 'exec' is not implemented yet.\n");
         return 0;
     }
 

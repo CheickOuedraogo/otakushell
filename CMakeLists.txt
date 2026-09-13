@@ -66,6 +66,7 @@ add_library(otaku_core STATIC
   src/shm.cpp
   src/frame.cpp
   src/module.cpp
+  src/supervisor.cpp
   src/hypr.cpp
   ${PROTOCOL_GEN_DIR}/wlr-layer-shell-protocol.c
   ${PROTOCOL_GEN_DIR}/xdg-shell-protocol.c
@@ -98,7 +99,22 @@ add_executable(otakushell src/cli.cpp)
 target_link_libraries(otakushell PRIVATE otaku_core)
 
 # ---------------------------------------------------------------------------
+# Module producer: otakud-mod
+# ---------------------------------------------------------------------------
+add_executable(otakud-mod src/otakud-mod.cpp)
+target_link_libraries(otakud-mod PRIVATE otaku_core)
+target_link_options(otakud-mod PRIVATE -rdynamic)
+
+# ---------------------------------------------------------------------------
+# Tests: lock-free shm ring round-trip
+# ---------------------------------------------------------------------------
+enable_testing()
+add_executable(ring-test tests/shm_ring_test.cpp)
+target_link_libraries(ring-test PRIVATE otaku_core)
+add_test(NAME shm-ring COMMAND ring-test)
+
+# ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 include(GNUInstallDirs)
-install(TARGETS otakud otakushell RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS otakud otakushell otakud-mod RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

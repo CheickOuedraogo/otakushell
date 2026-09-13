@@ -10,6 +10,7 @@ namespace otaku {
 
 class ISurface;
 class IModule;
+class ModuleSupervisor;
 struct Display;
 struct ShellConfig;
 struct Output;
@@ -26,6 +27,10 @@ public:
 
     void set_theme(const ThemeColors& colors);
 
+    // Instantiate the modules declared in spec.order, backed by `sup`'s
+    // producers. Uses the config for per-module options and the font.
+    void attach_modules(ModuleSupervisor& sup, const ShellConfig& cfg);
+
     // Attach the backing surface to this frame (daemon: layer; preview: toplevel).
     void set_surface(std::unique_ptr<ISurface> surface);
 
@@ -37,6 +42,7 @@ public:
 private:
     FrameSpec spec_;
     ThemeColors theme_;
+    std::string font_{"Sans 11"};
     std::unique_ptr<ISurface> surface_;
     std::vector<std::shared_ptr<IModule>> modules_;
 };
@@ -45,6 +51,7 @@ private:
 // each backed by a layer surface. Used by the daemon and re-run on hot-reload.
 // Auto-hide edges (FrameSpec::hidden) start collapsed to their trigger strip.
 std::vector<std::unique_ptr<Frame>> build_frames(Display& d,
+                                                 ModuleSupervisor& sup,
                                                  const ShellConfig& cfg,
                                                  const std::vector<Output>& outputs);
 

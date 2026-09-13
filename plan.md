@@ -112,11 +112,42 @@ démarrage via `hyprctl`.
       tracking `wl_pointer` (enter → affiche, leave → recycle).
 
 ### Étape 4 — Modules & IPC mémoire partagée
-- [ ] Plateforme de modules isolés (processus séparés) communiquant par
-      `shm_open`/`mmap` lock-free.
-- [ ] `module.cpp` : factory de modules (modules de base : horloge, réseau,
-      volume, système D-Bus…).
-- [ ] Directive `otakushell module enable|disable <name>`.
+- [x] Plateforme de modules isolés (processus séparés) communiquant par
+      `shm_open`/`mmap` lock-free. Nouveau binaire **`otakud-mod`** (producteur)
+      : chaque module tourne dans son propre processus, publie son état dans un
+      **ring-buffer SPSC lock-free** (région `otakuShell-<user>-mod-<name>`,
+      64 Ko, basée sur la logique `Fifo4b` de CharlesFrasch/cppcon2023,
+      public domain — vendored `third_party/LICENSE-unlicense`).
+      Le superviseur (`src/supervisor.cpp`) spawn/reap les producteurs
+      (`OTAKU_MOD_PATH`, défaut `otakud-mod`), draine les échantillons
+      (ticket de lecture ≥ 5 s → module "mort"). Un crash de producteur ≠
+      crash du shell.
+- [x] `module.cpp` : factory de modules — `IModule` lit le dernier échantillon
+      et le dessine (aucun polling du processus). Modules de base (tous
+      testables `--simulate`) : **clock** (strftime), **sysinfo** (/proc,
+      format `{cpu}`/`{mem}`), **audio** (wpctl/WirePlumber), **brightness**
+      (brightnessctl), **workspace** (hyprctl + `activeworkspace` pour le
+      focus). `module_supported()` évite de spawner des producteurs pour des
+      modules non implémentés (wifi, bluetooth, systray, app-dock → ignorés
+      silencieusement).
+- [x] Directive `otakushell module enable|disable <name>` : écrit un état
+      override (`$XDG_STATE_HOME` (ou `~/.local/state`)/`otakushell/
+      modules.state`, `[disabled]` TOML) — la config utilisateur reste intacte
+      — puis envoie `SIGUSR1` pour le reload à chaud.
+- [x] `otakushell status` lit une région d'état partagée
+      (`otakuShell-<user>-status`) écrite par le daemon (version, count frames,
+      modules actifs pid/seq) ; `not running` si région absente (lisible sans
+      daemon).
+- [x] Rendu : `frame.cpp` attache les modules (`attach_modules`), layout
+      horizontal + `font_metrics`/`render_text` (cairo/pangocairo, `src/
+      render.cpp`) ; le daemon repaint ~500 ms, `--once` fait deux échantillons
+      pour que les modules delta (sysinfo) aient une vraie valeur au premier
+      coup.
+- [x] Validé : build clean sans warnings, `ctest` (ring-test : capacity +
+      ordre + producteur absent → fail) 100 %, producteurs réels OK
+      (`sysinfo: CPU 21%  MEM 3.8G/7.4G`, `workspace: 1 2 ·3`), daemonisation
+      + nettoyage shm au SIGTERM, preview sur Hyprland (banner, fenêtre,
+      fermeture).
 
 ### Étapes suivantes (à affiner)
 - [ ] Lockscreen via `ext-session-lock` (frame `lockscreen`).
@@ -133,7 +164,7 @@ démarrage via `hyprctl`.
 | 1 — Noyau layer-shell    | ✅ Terminé (mergé dans `main`) |
 | 2 — Preview autonome     | ✅ Terminé (branche `feat/preview-toplevel`) |
 | 3 — Frames + hot-reload  | ✅ Terminé (branche `feat/frames-config`) |
-| 4 — Modules & IPC        | ⬜ À venir |
+| 4 — Modules & IPC        | ✅ Implémenté (branche `feat/modules-ipc`, en attente de merge) |
 | Lockscreen + suite       | ⬜ À venir |
 
 ---

@@ -4,6 +4,7 @@
 
 #include "otaku/module.hpp"
 #include "otaku/render.hpp"
+#include "otaku/supervisor.hpp"
 #include "otaku/wayland.hpp"
 
 namespace otaku {
@@ -20,17 +21,22 @@ uint32_t color_to_argb(const Color& c) {
 
 }  // namespace
 
-Frame::Frame(const FrameSpec& spec) : spec_(spec) {
-    // Instantiate the modules declared in spec.order.
-    for (const auto& mod : spec_.order) {
-        if (auto m = create_module(mod, false))
-            modules_.push_back(std::move(m));
-    }
-}
+Frame::Frame(const FrameSpec& spec) : spec_(spec) {}
 
 Frame::~Frame() = default;
 
 void Frame::set_theme(const ThemeColors& colors) { theme_ = colors; }
+
+void Frame::attach_modules(ModuleSupervisor& sup, const ShellConfig& cfg) {
+    font_ = cfg.font;
+    for (const auto& mod : spec_.order) {
+        std::string opts;
+        if (auto it = cfg.modules.find(mod); it != cfg.modules.end())
+            opts = serialize_module_options(it->second);
+        if (auto m = create_module(mod, sup, opts))
+            modules_.push_back(std::move(m));
+    }
+}
 
 void Frame::set_surface(std::unique_ptr<ISurface> surface) {
     surface_ = std::move(surface);
@@ -46,6 +52,20 @@ void Frame::render() {
     if (!surface_) return;
     if (surface_->visible()) {
         render_background(*surface_, color_to_argb(theme_.background), 10);
+
+        // Horizontal module layout, left-aligned with small padding.
+        constexpr int kPadX = 14;
+        int x = kPadX;
+        const uint32_t fg = color_to_argb(theme_.foreground);
+        const int h = surface_->height();
+        for (auto& m : modules_) {
+            RenderContext ctx;
+            ctx.font = font_;
+            ctx.fg = fg;
+            ctx.x = x;
+            ctx.height = h;
+            x += m->render(*surface_, ctx);
+        }
     } else {
         // A collapsed auto-hide edge renders fully transparent.
         render_fill_strip(*surface_, 0, surface_->height(), 0u);
@@ -53,7 +73,9 @@ void Frame::render() {
     surface_->present();
 }
 
-std::vector<std::unique_ptr<Frame>> build_frames(Display& d, const ShellConfig& cfg,
+std::vector<std::unique_ptr<Frame>> build_frames(Display& d,
+                                                 ModuleSupervisor& sup,
+                                                 const ShellConfig& cfg,
                                                  const std::vector<Output>& outputs) {
     std::vector<std::unique_ptr<Frame>> frames;
     for (const auto& fspec : cfg.frames) {
@@ -66,6 +88,7 @@ std::vector<std::unique_ptr<Frame>> build_frames(Display& d, const ShellConfig& 
                                              fspec.exclusive, fspec.hidden);
             auto f = std::make_unique<Frame>(fspec);
             f->set_theme(cfg.colors);
+            f->attach_modules(sup, cfg);
             if (fspec.hidden) surf->set_visible(false);  // start collapsed
             f->set_surface(std::move(surf));
             frames.push_back(std::move(f));
