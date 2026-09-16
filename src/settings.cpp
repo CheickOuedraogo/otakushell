@@ -175,12 +175,27 @@ struct App {
     int height_val() const { return cfg.height; }
     void set_height(int v) { cfg.height = std::clamp(v, 16, 96); }
 
+    static int default_interval_for(const std::string& name) {
+        if (name == "clock") return 1000;
+        if (name == "sysinfo") return 2000;
+        if (name == "audio") return 500;
+        if (name == "brightness") return 1000;
+        if (name == "workspace") return 1000;
+        if (name == "wifi") return 3000;
+        if (name == "bluetooth") return 3000;
+        if (name == "app-dock") return 1000;
+        if (name == "systray") return 2000;
+        return 1000;
+    }
+
     int interval_val(int mi) const {
-        const auto it = cfg.modules.find(modules[static_cast<size_t>(mi)]);
-        if (it == cfg.modules.end()) return 0;
-        const auto o = it->second.find("interval_ms");
-        if (o == it->second.end()) return 0;
-        return std::atoi(o->second.c_str());
+        const auto& name = modules[static_cast<size_t>(mi)];
+        const auto it = cfg.modules.find(name);
+        if (it != cfg.modules.end()) {
+            const auto o = it->second.find("interval_ms");
+            if (o != it->second.end()) return std::atoi(o->second.c_str());
+        }
+        return default_interval_for(name);
     }
     void set_interval(int mi, int v) {
         cfg.modules[modules[static_cast<size_t>(mi)]]["interval_ms"] =
@@ -779,6 +794,12 @@ void seed_module_defaults(ShellConfig& cfg, const std::string& name) {
         if (opts.count("format") == 0) opts["format"] = "CPU {cpu}%  MEM {mem}";
     } else if (name == "app-dock") {
         if (opts.count("pinned") == 0) opts["pinned"] = "firefox,kitty,code";
+    }
+    // Ensure interval is seeded so the slider shows a sane default even before first edit
+    if (opts.count("interval_ms") == 0) {
+        int d = App::default_interval_for(name);
+        // only seed for modules that have a meaningful default (all known)
+        opts["interval_ms"] = std::to_string(d);
     }
 }
 

@@ -24,7 +24,7 @@ void usage() {
         "otakushell - otakuShell control CLI\n"
         "\n"
         "usage:\n"
-        "  otakushell preview [frame-id]    open a window previewing a frame\n"
+        "  otakushell preview [--list|--all] [frame-id]  open a window previewing a frame\n"
         "  otakushell settings              open the graphical settings editor\n"
         "  otakushell reload               hot-reload config\n"
         "  otakushell status               show active frames/modules\n"
@@ -85,33 +85,56 @@ int main(int argc, char** argv) {
 
     if (cmd == "preview") {
         std::string cfg_path = getenv("OTAKU_CONFIG") ? getenv("OTAKU_CONFIG")
-                                                      : "config.toml";
+                                                       : "config.toml";
         ShellConfig cfg;
         if (!load_config(cfg_path, cfg)) {
             std::fprintf(stderr, "otakushell: could not load '%s'\n", cfg_path.c_str());
             return 1;
         }
 
-        // One preview window per frame; default to the top navbar.
-        const std::string wanted = (argc >= 3) ? argv[2] : "navbar-top";
-        const FrameSpec* fspec = nullptr;
-        for (const auto& f : cfg.frames) {
-            if (f.id == wanted) {
-                fspec = &f;
-                break;
+        // --list: show previewable frames
+        if (argc >= 3 && (std::string(argv[2]) == "--list" || std::string(argv[2]) == "-l")) {
+            std::printf("previewable frames (anchor != full/none):\n");
+            for (const auto& f : cfg.frames) {
+                if (f.anchor == Anchor::Full || f.anchor == Anchor::None) continue;
+                const char* orient = (f.anchor == Anchor::Top || f.anchor == Anchor::Bottom)
+                                     ? "horizontal" : "vertical";
+                std::printf("  %-18s %s  order:", f.id.c_str(), orient);
+                for (const auto& m : f.order) std::printf(" %s", m.c_str());
+                std::printf("\n");
             }
+            return 0;
         }
-        if (!fspec) {
-            std::fprintf(stderr, "otakushell: unknown frame '%s' (see config.toml)\n",
-                         wanted.c_str());
-            return 1;
-        }
-        if (fspec->anchor == Anchor::Full || fspec->anchor == Anchor::None) {
-            std::fprintf(stderr,
-                         "otakushell: frame '%s' cannot be previewed in a window "
-                         "(anchors full/none are for the desktop)\n",
-                         fspec->id.c_str());
-            return 1;
+
+        // Collect target frame specs (single vs --all)
+        std::vector<const FrameSpec*> targets;
+        const bool all = (argc >= 3 && (std::string(argv[2]) == "--all" || std::string(argv[2]) == "-a"));
+        if (all) {
+            for (const auto& f : cfg.frames)
+                if (f.anchor != Anchor::Full && f.anchor != Anchor::None)
+                    targets.push_back(&f);
+            if (targets.empty()) {
+                std::fprintf(stderr, "otakushell: no previewable frames (all are full/none)\n");
+                return 1;
+            }
+        } else {
+            const std::string wanted = (argc >= 3) ? argv[2] : "navbar-top";
+            // allow `preview --all <ignored>` with extra arg?
+            const FrameSpec* fspec = nullptr;
+            for (const auto& f : cfg.frames) if (f.id == wanted) { fspec = &f; break; }
+            if (!fspec) {
+                std::fprintf(stderr, "otakushell: unknown frame '%s' (see config.toml or --list)\n",
+                             wanted.c_str());
+                return 1;
+            }
+            if (fspec->anchor == Anchor::Full || fspec->anchor == Anchor::None) {
+                std::fprintf(stderr,
+                             "otakushell: frame '%s' cannot be previewed in a window "
+                             "(anchors full/none are for the desktop; --list to see previewable)\n",
+                             fspec->id.c_str());
+                return 1;
+            }
+            targets.push_back(fspec);
         }
 
         // The preview needs only xdg-shell, not layer-shell.
@@ -125,40 +148,64 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        // Bar frames span a mock screen; edges run along it.
         constexpr int32_t kMockScreen = 1280;
-        const bool horizontal = (fspec->anchor == Anchor::Top ||
-                                 fspec->anchor == Anchor::Bottom);
-        const int32_t win_w = horizontal ? kMockScreen : cfg.height;
-        const int32_t win_h = horizontal ? cfg.height : kMockScreen;
+        ModuleSupervisor supervisor(/*simulate=*/true);  // mocked data
+        std::vector<std::unique_ptr<Frame>> frames;
+        frames.reserve(targets.size());
 
-        auto surf = create_toplevel_surface(
-            d, "otakushell preview \xe2\x80\x94 " + fspec->id, win_w, win_h, &alive);
-        if (!surf) {
-            std::fprintf(stderr, "otakushell: failed to create preview window\n");
+        for (const FrameSpec* fspec : targets) {
+            const bool horizontal = (fspec->anchor == Anchor::Top ||
+                                      fspec->anchor == Anchor::Bottom);
+            const int32_t win_w = horizontal ? kMockScreen : cfg.height;
+            const int32_t win_h = horizontal ? cfg.height : kMockScreen;
+            auto surf = create_toplevel_surface(
+                d, "otakushell preview \xe2\x80\x94 " + fspec->id, win_w, win_h, &alive);
+            if (!surf) {
+                std::fprintf(stderr, "otakushell: failed to create preview window for '%s'\n",
+                             fspec->id.c_str());
+                continue;
+            }
+            auto fr = std::make_unique<Frame>(*fspec);
+            fr->set_theme(cfg.colors);
+            fr->attach_modules(supervisor, cfg);
+            fr->set_surface(std::move(surf));
+            frames.push_back(std::move(fr));
+        }
+
+        if (frames.empty()) {
+            std::fprintf(stderr, "otakushell: failed to create preview window(s)\n");
             display_disconnect(d);
+            supervisor.shutdown();
             return 1;
         }
 
-        ModuleSupervisor supervisor(/*simulate=*/true);  // mocked data
-        Frame frame(*fspec);
-        frame.set_theme(cfg.colors);
-        frame.attach_modules(supervisor, cfg);
-        frame.set_surface(std::move(surf));
-
         // Let the compositor deliver the initial configure, then first frame.
         wl_display_roundtrip(d.display);
-        frame.render();
+        for (auto& f : frames) f->render();
         wl_display_flush(d.display);
 
-        std::printf("otakushell preview (%s): frame '%s' (%s)\n", OTAKU_VERSION,
-                    fspec->id.c_str(),
-                    horizontal ? "top/bottom bar" : "side edge");
-        std::printf("otakushell: close the window to quit.\n");
+        if (targets.size() == 1) {
+            const bool h = (targets[0]->anchor == Anchor::Top || targets[0]->anchor == Anchor::Bottom);
+            std::printf("otakushell preview (%s): frame '%s' (%s)\n", OTAKU_VERSION,
+                        targets[0]->id.c_str(), h ? "top/bottom bar" : "side edge");
+        } else {
+            std::printf("otakushell preview (%s): %zu frames", OTAKU_VERSION, frames.size());
+            for (auto* t : targets) std::printf(" %s", t->id.c_str());
+            std::printf("\n");
+        }
+        std::printf("otakushell: close any window to quit.\n");
         std::fflush(stdout);
 
+        uint64_t last_paint = mono_ns();
         while (alive.load()) {
-            supervisor.poll_all(mono_ns());
+            const uint64_t now = mono_ns();
+            supervisor.poll_all(now);
+            // Repaint ~500ms like the daemon so clock/sysinfo/wifi stay fresh
+            if (now - last_paint >= 500'000'000ull) {
+                last_paint = now;
+                for (auto& f : frames) f->render();
+                wl_display_flush(d.display);
+            }
             if (!display_wait(d, 100)) break;
         }
 
