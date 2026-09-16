@@ -26,9 +26,15 @@
 #include <string>
 #include <vector>
 
+#include <algorithm>
 #include <cmath>
 #include <sys/types.h>
 #include <unistd.h>
+
+#if __has_include(<dbus/dbus.h>)
+#include <dbus/dbus.h>
+#define HAVE_DBUS 1
+#endif
 
 #include "otaku/shm.hpp"
 
@@ -383,6 +389,353 @@ std::string provider_brightness(const Opts& o, bool simulate) {
     return "BRI " + std::to_string(pct) + "%";
 }
 
+std::string to_lower_str(std::string s) {
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+std::vector<std::string> split_csv(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == ',') {
+            // trim
+            size_t a = cur.find_first_not_of(" \t");
+            size_t b = cur.find_last_not_of(" \t");
+            if (a != std::string::npos) cur = cur.substr(a, b - a + 1);
+            else cur.clear();
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    size_t a = cur.find_first_not_of(" \t");
+    size_t b = cur.find_last_not_of(" \t");
+    if (a != std::string::npos) cur = cur.substr(a, b - a + 1);
+    else cur.clear();
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+// --- D-Bus helpers (libdbus) ------------------------------------------------
+#ifdef HAVE_DBUS
+namespace dbus_help {
+inline DBusMessage* prop_get(DBusConnection* conn, const char* service,
+                             const char* path, const char* iface,
+                             const char* prop) {
+    DBusMessage* msg = dbus_message_new_method_call(service, path,
+        "org.freedesktop.DBus.Properties", "Get");
+    if (!msg) return nullptr;
+    const char* i = iface;
+    const char* p = prop;
+    DBusMessageIter it, sub;
+    dbus_message_iter_init_append(msg, &it);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &i);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &p);
+    DBusError err; dbus_error_init(&err);
+    DBusMessage* reply = dbus_connection_send_with_reply_and_block(conn, msg, 1500, &err);
+    dbus_message_unref(msg);
+    if (dbus_error_is_set(&err)) dbus_error_free(&err);
+    return reply; // caller must unref
+}
+inline bool variant_get_string(DBusMessage* reply, std::string& out) {
+    if (!reply) return false;
+    DBusMessageIter it, var;
+    if (!dbus_message_iter_init(reply, &it)) return false;
+    if (dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_VARIANT) return false;
+    dbus_message_iter_recurse(&it, &var);
+    if (dbus_message_iter_get_arg_type(&var) != DBUS_TYPE_STRING) return false;
+    const char* s = nullptr;
+    dbus_message_iter_get_basic(&var, &s);
+    if (s) out = s;
+    return s != nullptr;
+}
+inline bool variant_get_uint32(DBusMessage* reply, uint32_t& out) {
+    if (!reply) return false;
+    DBusMessageIter it, var;
+    if (!dbus_message_iter_init(reply, &it)) return false;
+    if (dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_VARIANT) return false;
+    dbus_message_iter_recurse(&it, &var);
+    int t = dbus_message_iter_get_arg_type(&var);
+    if (t == DBUS_TYPE_UINT32) { dbus_message_iter_get_basic(&var, &out); return true; }
+    if (t == DBUS_TYPE_BYTE) { uint8_t b=0; dbus_message_iter_get_basic(&var,&b); out=b; return true; }
+    return false;
+}
+inline bool variant_get_byte_array(DBusMessage* reply, std::string& out) {
+    if (!reply) return false;
+    DBusMessageIter it, var, arr;
+    if (!dbus_message_iter_init(reply, &it)) return false;
+    if (dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_VARIANT) return false;
+    dbus_message_iter_recurse(&it, &var);
+    if (dbus_message_iter_get_arg_type(&var) != DBUS_TYPE_ARRAY) return false;
+    dbus_message_iter_recurse(&var, &arr);
+    out.clear();
+    while (dbus_message_iter_get_arg_type(&arr) == DBUS_TYPE_BYTE) {
+        uint8_t b=0; dbus_message_iter_get_basic(&arr,&b); out.push_back(static_cast<char>(b));
+        dbus_message_iter_next(&arr);
+    }
+    return true;
+}
+inline bool variant_get_bool(DBusMessage* reply, bool& out) {
+    if (!reply) return false;
+    DBusMessageIter it, var;
+    if (!dbus_message_iter_init(reply, &it)) return false;
+    if (dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_VARIANT) return false;
+    dbus_message_iter_recurse(&it, &var);
+    if (dbus_message_iter_get_arg_type(&var) != DBUS_TYPE_BOOLEAN) return false;
+    dbus_bool_t b=0; dbus_message_iter_get_basic(&var,&b); out = b!=0; return true;
+}
+} // namespace dbus_help
+#endif
+
+std::string provider_wifi_dbus_try() {
+#ifdef HAVE_DBUS
+    DBusError err; dbus_error_init(&err);
+    DBusConnection* conn = dbus_bus_get(DBUS_BUS_SYSTEM, &err);
+    if (!conn || dbus_error_is_set(&err)) { if (dbus_error_is_set(&err)) dbus_error_free(&err); return ""; }
+    // GetDevices
+    DBusMessage* msg = dbus_message_new_method_call("org.freedesktop.NetworkManager",
+        "/org/freedesktop/NetworkManager","org.freedesktop.NetworkManager","GetDevices");
+    if (!msg) return "";
+    DBusMessage* reply = dbus_connection_send_with_reply_and_block(conn, msg, 1500, &err);
+    dbus_message_unref(msg);
+    if (!reply || dbus_error_is_set(&err)) { if(reply) dbus_message_unref(reply); if(dbus_error_is_set(&err)) dbus_error_free(&err); return ""; }
+    DBusMessageIter it, arr;
+    dbus_message_iter_init(reply, &it);
+    if (dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_ARRAY) { dbus_message_unref(reply); return ""; }
+    dbus_message_iter_recurse(&it, &arr);
+    std::string best;
+    uint32_t best_strength = 0;
+    while (dbus_message_iter_get_arg_type(&arr) == DBUS_TYPE_OBJECT_PATH) {
+        const char* dev_path=nullptr; dbus_message_iter_get_basic(&arr,&dev_path);
+        if (dev_path) {
+            DBusMessage* rtype = dbus_help::prop_get(conn, "org.freedesktop.NetworkManager", dev_path,
+                "org.freedesktop.NetworkManager.Device", "DeviceType");
+            uint32_t dtype=0; bool ok=false;
+            if (rtype) { ok = dbus_help::variant_get_uint32(rtype, dtype); dbus_message_unref(rtype); }
+            if (ok && dtype == 2) { // WIFI
+                DBusMessage* rap = dbus_help::prop_get(conn, "org.freedesktop.NetworkManager", dev_path,
+                    "org.freedesktop.NetworkManager.Device.Wireless", "ActiveAccessPoint");
+                std::string ap; bool has_ap=false;
+                if (rap) { has_ap = dbus_help::variant_get_string(rap, ap); dbus_message_unref(rap); }
+                if (has_ap && ap != "/") {
+                    std::string ssid;
+                    DBusMessage* rssid = dbus_help::prop_get(conn, "org.freedesktop.NetworkManager", ap.c_str(),
+                        "org.freedesktop.NetworkManager.AccessPoint", "Ssid");
+                    if (rssid) { dbus_help::variant_get_byte_array(rssid, ssid); dbus_message_unref(rssid); }
+                    uint32_t strength=0;
+                    DBusMessage* rstr = dbus_help::prop_get(conn, "org.freedesktop.NetworkManager", ap.c_str(),
+                        "org.freedesktop.NetworkManager.AccessPoint", "Strength");
+                    if (rstr) { dbus_help::variant_get_uint32(rstr, strength); dbus_message_unref(rstr); }
+                    if (!ssid.empty()) {
+                        if (strength > best_strength) { best_strength = strength; best = ssid + " " + std::to_string(strength) + "%"; }
+                        else if (best.empty()) best = ssid + " " + std::to_string(strength) + "%";
+                    }
+                }
+            }
+        }
+        dbus_message_iter_next(&arr);
+    }
+    dbus_message_unref(reply);
+    if (!best.empty()) return best;
+    return "";
+#else
+    return "";
+#endif
+}
+
+std::string provider_wifi(const Opts& o, bool simulate) {
+    (void)o;
+    if (simulate) return "WIFI otaku-5G 78%";
+    std::string dbus = provider_wifi_dbus_try();
+    if (!dbus.empty()) return "WIFI " + dbus;
+    // Fallback: nmcli
+    std::string out = run_capture("nmcli -t -f active,ssid,signal dev wifi 2>/dev/null | grep '^yes'");
+    if (!out.empty()) {
+        // yes:ssid:signal
+        size_t p1 = out.find(':'); size_t p2 = p1==std::string::npos?std::string::npos:out.find(':', p1+1);
+        if (p1!=std::string::npos && p2!=std::string::npos) {
+            std::string ssid = out.substr(p1+1, p2-p1-1);
+            std::string sig = rtrim(out.substr(p2+1));
+            // strip newline
+            size_t nl = sig.find('\n'); if (nl!=std::string::npos) sig = sig.substr(0,nl);
+            if (!ssid.empty()) return "WIFI " + ssid + " " + sig + "%";
+        }
+    }
+    // fallback iw
+    std::string iw = run_capture("iwgetid -r 2>/dev/null");
+    iw = rtrim(iw);
+    if (!iw.empty()) return "WIFI " + iw;
+    return "WIFI --";
+}
+
+std::string provider_bluetooth_dbus_try() {
+#ifdef HAVE_DBUS
+    DBusError err; dbus_error_init(&err);
+    DBusConnection* conn = dbus_bus_get(DBUS_BUS_SYSTEM, &err);
+    if (!conn || dbus_error_is_set(&err)) { if(dbus_error_is_set(&err)) dbus_error_free(&err); return ""; }
+    DBusMessage* msg = dbus_message_new_method_call("org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects");
+    if (!msg) return "";
+    DBusMessage* reply = dbus_connection_send_with_reply_and_block(conn, msg, 1500, &err);
+    dbus_message_unref(msg);
+    if (!reply || dbus_error_is_set(&err)) { if(reply) dbus_message_unref(reply); if(dbus_error_is_set(&err)) dbus_error_free(&err); return ""; }
+    // We just count connected devices and check adapter powered
+    DBusMessageIter it;
+    dbus_message_iter_init(reply, &it);
+    if (dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_ARRAY) { dbus_message_unref(reply); return ""; }
+    DBusMessageIter dict;
+    dbus_message_iter_recurse(&it, &dict);
+    bool powered = false; int connected = 0;
+    while (dbus_message_iter_get_arg_type(&dict) == DBUS_TYPE_DICT_ENTRY) {
+        DBusMessageIter entry, pathIter, ifaceDict;
+        const char* obj_path=nullptr;
+        dbus_message_iter_recurse(&dict, &entry);
+        dbus_message_iter_get_basic(&entry, &obj_path);
+        dbus_message_iter_next(&entry);
+        dbus_message_iter_recurse(&entry, &ifaceDict);
+        while (dbus_message_iter_get_arg_type(&ifaceDict) == DBUS_TYPE_DICT_ENTRY) {
+            DBusMessageIter ie, props;
+            dbus_message_iter_recurse(&ifaceDict, &ie);
+            const char* iface=nullptr; dbus_message_iter_get_basic(&ie,&iface);
+            dbus_message_iter_next(&ie);
+            dbus_message_iter_recurse(&ie, &props);
+            if (iface && std::strcmp(iface,"org.bluez.Adapter1")==0) {
+                while (dbus_message_iter_get_arg_type(&props)==DBUS_TYPE_DICT_ENTRY) {
+                    DBusMessageIter pe, v;
+                    dbus_message_iter_recurse(&props,&pe);
+                    const char* key=nullptr; dbus_message_iter_get_basic(&pe,&key);
+                    dbus_message_iter_next(&pe);
+                    dbus_message_iter_recurse(&pe,&v);
+                    if (key && std::strcmp(key,"Powered")==0) {
+                        int t = dbus_message_iter_get_arg_type(&v);
+                        if (t==DBUS_TYPE_VARIANT) {
+                            DBusMessageIter vv; dbus_message_iter_recurse(&v,&vv);
+                            if (dbus_message_iter_get_arg_type(&vv)==DBUS_TYPE_BOOLEAN) { dbus_bool_t b; dbus_message_iter_get_basic(&vv,&b); powered=b; }
+                        }
+                    }
+                    dbus_message_iter_next(&props);
+                }
+            } else if (iface && std::strcmp(iface,"org.bluez.Device1")==0) {
+                bool conn=false;
+                while (dbus_message_iter_get_arg_type(&props)==DBUS_TYPE_DICT_ENTRY) {
+                    DBusMessageIter pe, v;
+                    dbus_message_iter_recurse(&props,&pe);
+                    const char* key=nullptr; dbus_message_iter_get_basic(&pe,&key);
+                    dbus_message_iter_next(&pe);
+                    dbus_message_iter_recurse(&pe,&v);
+                    if (key && std::strcmp(key,"Connected")==0) {
+                        int t=dbus_message_iter_get_arg_type(&v);
+                        if(t==DBUS_TYPE_VARIANT){DBusMessageIter vv; dbus_message_iter_recurse(&v,&vv); if(dbus_message_iter_get_arg_type(&vv)==DBUS_TYPE_BOOLEAN){dbus_bool_t b; dbus_message_iter_get_basic(&vv,&b); conn=b;}}
+                    }
+                    dbus_message_iter_next(&props);
+                }
+                if (conn) ++connected;
+            }
+            dbus_message_iter_next(&ifaceDict);
+        }
+        dbus_message_iter_next(&dict);
+    }
+    dbus_message_unref(reply);
+    if (!powered) return "BT off";
+    if (connected>0) return "BT " + std::to_string(connected) + " dev";
+    return "BT on";
+#else
+    return "";
+#endif
+}
+
+std::string provider_bluetooth(const Opts& o, bool simulate) {
+    (void)o;
+    if (simulate) return "BT on";
+    std::string dbus = provider_bluetooth_dbus_try();
+    if (!dbus.empty()) return dbus;
+    std::string out = run_capture("bluetoothctl show 2>/dev/null | grep Powered");
+    if (out.find("yes")!=std::string::npos) {
+        std::string devs = run_capture("bluetoothctl devices Connected 2>/dev/null | wc -l");
+        int n = std::atoi(devs.c_str());
+        if (n>0) return "BT " + std::to_string(n) + " dev";
+        return "BT on";
+    }
+    if (out.find("no")!=std::string::npos) return "BT off";
+    return "BT --";
+}
+
+std::string provider_app_dock(const Opts& o, bool simulate) {
+    std::string pinned_s = o.get("pinned", "firefox,kitty,code");
+    auto pinned = split_csv(pinned_s);
+    if (pinned.empty()) pinned = {"firefox","kitty","code"};
+    if (simulate) {
+        std::string out;
+        for (size_t i=0;i<pinned.size();++i) {
+            if (i) out += "  ";
+            out += (i%2==0 ? "\u25cf " : "\u25cb ") + pinned[i];
+        }
+        return out;
+    }
+    std::string json = run_capture("hyprctl -j clients 2>/dev/null");
+    std::map<std::string,bool> running;
+    for (auto& p : pinned) running[to_lower_str(p)] = false;
+    if (!json.empty()) {
+        jmin::Value root;
+        if (jmin::parse(json, root) && root.t==jmin::Value::T::Arr) {
+            for (auto& c : root.arr) {
+                if (c.t!=jmin::Value::T::Obj) continue;
+                const jmin::Value* cls = c.get("class");
+                if (!cls) cls = c.get("initialClass");
+                if (!cls || cls->t!=jmin::Value::T::Str) continue;
+                std::string lc = to_lower_str(cls->s);
+                for (auto& p : pinned) {
+                    std::string lp = to_lower_str(p);
+                    if (lc.find(lp)!=std::string::npos || lp.find(lc)!=std::string::npos) running[lp]=true;
+                }
+            }
+        }
+    }
+    std::string out;
+    for (size_t i=0;i<pinned.size();++i) {
+        if (i) out += "  ";
+        std::string lp = to_lower_str(pinned[i]);
+        bool is = running.count(lp) ? running[lp] : false;
+        out += (is ? "\u25cf " : "\u25cb ") + pinned[i];
+    }
+    return out.empty() ? "--" : out;
+}
+
+std::string provider_systray(const Opts& o, bool simulate) {
+    (void)o;
+    if (simulate) return "TRAY 3";
+    // D-Bus StatusNotifierWatcher: count registered items
+#ifdef HAVE_DBUS
+    DBusError err; dbus_error_init(&err);
+    DBusConnection* conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
+    if (conn && !dbus_error_is_set(&err)) {
+        DBusMessage* msg = dbus_message_new_method_call("org.kde.StatusNotifierWatcher",
+            "/StatusNotifierWatcher","org.kde.StatusNotifierWatcher","RegisteredStatusNotifierItems");
+        // Actually it's a property; try Properties Get
+        DBusMessage* prop = dbus_help::prop_get(conn, "org.kde.StatusNotifierWatcher",
+            "/StatusNotifierWatcher","org.kde.StatusNotifierWatcher","RegisteredStatusNotifierItems");
+        if (prop) {
+            DBusMessageIter it, var, arr;
+            dbus_message_iter_init(prop,&it);
+            if (dbus_message_iter_get_arg_type(&it)==DBUS_TYPE_VARIANT) {
+                dbus_message_iter_recurse(&it,&var);
+                if (dbus_message_iter_get_arg_type(&var)==DBUS_TYPE_ARRAY) {
+                    dbus_message_iter_recurse(&var,&arr);
+                    int n=0; while(dbus_message_iter_get_arg_type(&arr)==DBUS_TYPE_STRING){++n; dbus_message_iter_next(&arr);}
+                    dbus_message_unref(prop);
+                    if (n>=0) return "TRAY " + std::to_string(n);
+                }
+            }
+            dbus_message_unref(prop);
+        }
+        if (msg) dbus_message_unref(msg);
+    }
+    if (dbus_error_is_set(&err)) dbus_error_free(&err);
+#endif
+    return "TRAY --";
+}
+
 std::string provider_workspace(const Opts& o, bool simulate) {
     if (simulate) return "1 2\u00b73";
     const std::string json = run_capture("hyprctl -j workspaces 2>/dev/null");
@@ -442,6 +795,10 @@ const char* provider_name(const std::string& name) {
     if (name == "audio") return "audio";
     if (name == "brightness") return "brightness";
     if (name == "workspace") return "workspace";
+    if (name == "wifi") return "wifi";
+    if (name == "bluetooth") return "bluetooth";
+    if (name == "app-dock") return "app-dock";
+    if (name == "systray") return "systray";
     return nullptr;
 }
 
@@ -451,6 +808,10 @@ int default_interval(const std::string& name) {
     if (name == "audio") return 500;
     if (name == "brightness") return 1000;
     if (name == "workspace") return 1000;
+    if (name == "wifi") return 3000;
+    if (name == "bluetooth") return 3000;
+    if (name == "app-dock") return 1000;
+    if (name == "systray") return 2000;
     return 1000;
 }
 
@@ -460,6 +821,10 @@ std::string collect(const std::string& name, const Opts& o, bool simulate) {
     if (name == "audio") return provider_audio(o, simulate);
     if (name == "brightness") return provider_brightness(o, simulate);
     if (name == "workspace") return provider_workspace(o, simulate);
+    if (name == "wifi") return provider_wifi(o, simulate);
+    if (name == "bluetooth") return provider_bluetooth(o, simulate);
+    if (name == "app-dock") return provider_app_dock(o, simulate);
+    if (name == "systray") return provider_systray(o, simulate);
     return "--";
 }
 

@@ -257,8 +257,28 @@ int main(int argc, char** argv) {
     }
 
     if (cmd == "exec") {
-        std::fprintf(stderr, "otakushell: 'exec' is not implemented yet.\n");
-        return 0;
+        if (argc < 3) {
+            std::fprintf(stderr, "otakushell: exec needs a command\n");
+            return 1;
+        }
+        std::string joined;
+        for (int i = 2; i < argc; ++i) {
+            if (i > 2) joined += ' ';
+            joined += argv[i];
+        }
+        if (hyprland_available()) {
+            // Escape single quotes for the shell wrapper.
+            std::string esc;
+            for (char c : joined) {
+                if (c == '\'') esc += "'\\''";
+                else esc += c;
+            }
+            std::string hypr = "hyprctl dispatch exec '" + esc + "' 2>/dev/null";
+            int rc = std::system(hypr.c_str());
+            if (rc == 0) return 0;
+        }
+        int rc = std::system(joined.c_str());
+        return WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
     }
 
     usage();

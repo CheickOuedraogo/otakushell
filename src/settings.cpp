@@ -94,9 +94,11 @@ const std::string kUIFontH = "Sans 12";
 const std::vector<std::string>& known_options(const std::string& name) {
     static const std::vector<std::string> kClock = {"format", "date_format"};
     static const std::vector<std::string> kSysinfo = {"format"};
+    static const std::vector<std::string> kAppDock = {"pinned"};
     static const std::vector<std::string> kNone;
     if (name == "clock") return kClock;
     if (name == "sysinfo") return kSysinfo;
+    if (name == "app-dock") return kAppDock;
     return kNone;
 }
 
@@ -775,6 +777,8 @@ void seed_module_defaults(ShellConfig& cfg, const std::string& name) {
         if (opts.count("date_format") == 0) opts["date_format"] = "%a %d %b";
     } else if (name == "sysinfo") {
         if (opts.count("format") == 0) opts["format"] = "CPU {cpu}%  MEM {mem}";
+    } else if (name == "app-dock") {
+        if (opts.count("pinned") == 0) opts["pinned"] = "firefox,kitty,code";
     }
 }
 

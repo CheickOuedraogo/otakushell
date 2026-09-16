@@ -14,8 +14,9 @@ namespace {
 
 // Producers implemented by otakud-mod. Kept in sync with `kProviders` in
 // src/otakud-mod.cpp.
-const char* const kSupported[] = {"clock",    "sysinfo", "audio",
-                                  "brightness", "workspace"};
+const char* const kSupported[] = {"clock",     "sysinfo",  "audio",
+                                   "brightness", "workspace", "wifi",
+                                   "bluetooth", "app-dock", "systray"};
 
 // A text module: simply shows the producer's latest sample (a "--" placeholder
 // while the producer is still starting). Rendering is layout-agnostic, so the

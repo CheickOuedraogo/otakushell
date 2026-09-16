@@ -163,7 +163,23 @@ bool load_config(const std::string& path, ShellConfig& out) {
                 else if (val.is_integer())
                     mopts[std::string(key)] =
                         std::to_string(val.as_integer()->get());
-                else if (auto s = val.value<std::string>())
+                else if (val.is_array()) {
+                    // Arrays (e.g. pinned = ["firefox", "kitty"]) → comma-joined string.
+                    std::string joined;
+                    for (const auto& e : *val.as_array()) {
+                        if (auto s = e.value<std::string>()) {
+                            if (!joined.empty()) joined += ',';
+                            joined += *s;
+                        } else if (e.is_integer()) {
+                            if (!joined.empty()) joined += ',';
+                            joined += std::to_string(e.as_integer()->get());
+                        } else if (e.is_boolean()) {
+                            if (!joined.empty()) joined += ',';
+                            joined += e.as_boolean()->get() ? "true" : "false";
+                        }
+                    }
+                    mopts[std::string(key)] = joined;
+                } else if (auto s = val.value<std::string>())
                     mopts[std::string(key)] = *s;
             }
             out.modules[std::string(mod_name)] = std::move(mopts);
@@ -297,7 +313,39 @@ bool save_config(const std::string& path, const ShellConfig& cfg) {
     toml::table mods;
     for (const auto& [name, opts] : cfg.modules) {
         toml::table mo;
-        for (const auto& [k, v] : opts) insert_option(mo, k, v);
+        for (const auto& [k, v] : opts) {
+            // Known array options (e.g. app-dock.pinned) → emit as TOML array.
+            if (k == "pinned") {
+                toml::array arr;
+                std::string cur;
+                for (char c : v) {
+                    if (c == ',') {
+                        if (!cur.empty()) { arr.push_back(cur); cur.clear(); }
+                    } else if (c != ' ' && c != '\t') {
+                        cur += c;
+                    } else if (!cur.empty()) {
+                        cur += c; // keep interior spaces? pinned names have none.
+                    }
+                }
+                if (!cur.empty()) arr.push_back(cur);
+                // Trim spaces from each entry.
+                toml::array trimmed;
+                for (auto& e : arr) {
+                    if (auto s = e.value<std::string>()) {
+                        std::string t = *s;
+                        size_t a = t.find_first_not_of(" \t");
+                        size_t b = t.find_last_not_of(" \t");
+                        if (a != std::string::npos) t = t.substr(a, b - a + 1);
+                        else t.clear();
+                        if (!t.empty()) trimmed.push_back(t);
+                    }
+                }
+                if (!trimmed.empty() || v.empty()) mo.insert(k, std::move(trimmed));
+                else insert_option(mo, k, v);
+            } else {
+                insert_option(mo, k, v);
+            }
+        }
         mods.insert(name, std::move(mo));
     }
 

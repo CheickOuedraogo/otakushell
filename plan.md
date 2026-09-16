@@ -98,18 +98,19 @@ démarrage via `hyprctl`.
 - [x] Validé par l'utilisateur (fenêtre affichée, fermeture propre, daemon
       intact).
 
-### Étape 3 — Framework frames + config chaude
+### Étape 3 — Framework frames + config chaude  ✅ TERMINÉ
 - [x] Framework frames générique : `build_frames()` instancie une `Frame` par
-      frame déclarée dans la config (utilisée par le daemon ET le preview),
-      avec `on_resize` pour re-rendre au resize.
+       frame déclarée dans la config (utilisée par le daemon ET le preview),
+       avec `on_resize` pour re-rendre au resize.
 - [x] Hot-reload de la config : `otakushell reload` lit le PID file
-      (`XDG_RUNTIME_DIR/otakud.pid`) et envoie `SIGUSR1` à `otakud` ; le daemon
-      re-charge la config et reconstruit les frames (EINTR géré dans le poll).
+       (`XDG_RUNTIME_DIR/otakud.pid`) et envoie `SIGUSR1` à `otakud` ; le daemon
+       re-charge la config et reconstruit les frames (EINTR géré dans le poll).
 - [x] Application du thème : `Frame::set_theme(const ThemeColors&)` et
-      `render_background` depuis `[theme.colors]` de la config.
+       `render_background` depuis `[theme.colors]` de la config.
 - [x] Auto-hide pour l'edge (edge-right) : export `hidden = "auto"` en bool,
-      `LayerSurface` collabée en strip trigger 1px sans zone exclusive, pointer
-      tracking `wl_pointer` (enter → affiche, leave → recycle).
+       `LayerSurface` collabée en strip trigger 1px sans zone exclusive, pointer
+       tracking `wl_pointer` (enter → affiche, leave → recycle).
+- **Mergé : `merge: feat/frames-config (step 3 - frames framework, hot-reload, theme, auto-hide)`** (`7bc0b92`).
 
 ### Étape 4 — Modules & IPC mémoire partagée
 - [x] Plateforme de modules isolés (processus séparés) communiquant par
@@ -149,10 +150,34 @@ démarrage via `hyprctl`.
       + nettoyage shm au SIGTERM, preview sur Hyprland (banner, fenêtre,
       fermeture).
 
-### Étapes suivantes (à affiner)
-- [ ] Lockscreen via `ext-session-lock` (frame `lockscreen`).
-- [ ] Modules côté système (D-Bus natif).
-- [ ] Tests, packaginf, docs.
+### Étape 4 — Modules & IPC mémoire partagée  ✅ TERMINÉ
+- **Mergé : `merge: feat/modules-ipc (step 4 - modules & IPC, otakud-mod producers, lock-free SPSC rings)`** (`cf46b2b`).
+
+### Étape 5 — Lockscreen session-lock + settings UI cairo  ✅ TERMINÉ
+- [x] **Lockscreen `ext-session-lock`** (frame `lockscreen`, `anchor = "full"` `lock = true`) : `SessionLock` durci — `lock()` avec rollback si surfaces non prêtes, `pending` vs `locked`, `abort()` vs `unlock()` selon que `locked` a été confirmé, `teardown()` safe (float/destroy). `otakushell lock|unlock` → `SIGUSR2` → toggle, `Escape`/`Return` sur clavier lock déverrouille. `Display` plumbing : `wl_pointer` enter/leave/motion/button + `wl_keyboard` key/mods trackés par surface, `LayerSurface`/`ToplevelSurface` exposent `native_surface()`.
+- [x] **Settings UI** (`otakushell settings`) : fenêtre `xdg-toplevel` dessinée **cairo** (pas de toolkit) — édition live de `config.toml` (thème couleurs/palette catppuccin, font family/size, `height`, frames `anchor/exclusive/hidden/lock`, `order` drag, modules `enable/interval/format`). `render_rect` primitif, `config::save_config` atomique `tmp+rename` + `insert_option` typé (fix `toml++` `int→bool` coercion, `bool`/`int`/`string` préservés).
+- [x] Status étendu : `StatusRegion.lock_state` (`kLockOff/Pending/Active`), `otakushell status` affiche `lock`.
+- [x] Validé : build clean, `ring-test` OK, preview/settings/lock testés sur Hyprland.
+- **Implémenté : `feat: session-lock lockscreen and cairo settings UI (step 5)`** (`c37b068`, en avance sur `origin/main`, en attente de merge/push).
+
+### Étape 6 — Modules système D-Bus natif + polish  🚧 EN COURS (hors lockscreen)
+- [x] **Config** : `src/config.cpp` gère `modules.<name>.pinned` comme array TOML (`["firefox","kitty"]` ↔ `"firefox,kitty"` via `ModuleOptions`), `save_config` ré-émet `pinned` en array (trim, atomique), `load_config` joint les arrays en CSV.
+- [x] **otakud-mod** : 4 nouveaux producteurs `--simulate`/`--once` OK
+  - `wifi` : D-Bus `org.freedesktop.NetworkManager` (GetDevices → DeviceType==2 → ActiveAccessPoint → Ssid+Strength) via `libdbus` (`dbus_help::prop_get`), fallback `nmcli -t -f active,ssid,signal` puis `iwgetid -r`. `WIFI <ssid> 78%` / `WIFI --`.
+  - `bluetooth` : D-Bus `org.bluez` ObjectManager (Adapter1 Powered + Device1 Connected count), fallback `bluetoothctl show/devices`. `BT on/off/· N dev`.
+  - `app-dock` : `hyprctl -j clients` (jmin parse, match case-insensitive `class` vs `pinned` CSV), `●/○` par app. Opt `pinned` (`firefox,kitty,code` défaut, `split_csv`). Simulate `● firefox  ○ kitty`.
+  - `systray` : D-Bus `org.kde.StatusNotifierWatcher` (`RegisteredStatusNotifierItems` count) via `libdbus` session bus, fallback `--`. `TRAY N`.
+  - `provider_name`/`default_interval`/`collect` étendus, intervalles wifi/bt 3s, app-dock 1s, systray 2s.
+- [x] **module.cpp** : `kSupported[]` étendu (`wifi,bluetooth,app-dock,systray`), même `TextModule` (measure/render).
+- [x] **settings UI** : `known_options` + `seed_module_defaults` pour `app-dock` (`pinned`), modules déjà listés via `collect_modules` (frames order).
+- [x] **CLI `otakushell exec <cmd>`** : `src/cli.cpp` — join `argv[2..]`, tente `hyprctl dispatch exec '<cmd>'` si Hyprland, fallback `system()`, échappe `'` .
+- [x] Validé : `cmake --build` clean (warnings seuls unused), `ctest` 100 %, `otakud-mod {wifi,bluetooth,app-dock,systray} --simulate --once` OK, `wifi --once` a trouvé `WIFI FAMILLE OUEDRAOGO 86%`, `sytray --once` `TRAY 2`, `config` round-trip (`pinned` array ↔ CSV) OK.
+- Reste : packaging/systemd, polish systray icônes (pixmap → cairo), docs.
+
+### Étapes suivantes
+- [ ] Packaging, systemd user service, `make install` vérifié.
+- [ ] Systray icônes (D-Bus pixmap) + app-dock icônes/desktop entries.
+- [ ] Tests, docs.
 
 ---
 
@@ -162,10 +187,11 @@ démarrage via `hyprctl`.
 |-------|---------|
 | 0 — Squelette            | ✅ Terminé |
 | 1 — Noyau layer-shell    | ✅ Terminé (mergé dans `main`) |
-| 2 — Preview autonome     | ✅ Terminé (branche `feat/preview-toplevel`) |
-| 3 — Frames + hot-reload  | ✅ Terminé (branche `feat/frames-config`) |
-| 4 — Modules & IPC        | ✅ Implémenté (branche `feat/modules-ipc`, en attente de merge) |
-| Lockscreen + suite       | ⬜ À venir |
+| 2 — Preview autonome     | ✅ Terminé (mergé dans `main`) |
+| 3 — Frames + hot-reload  | ✅ Terminé (mergé dans `main`) |
+| 4 — Modules & IPC        | ✅ Terminé (mergé dans `main` — `cf46b2b`) |
+| 5 — Lockscreen + settings | ✅ Terminé (implémenté `c37b068`, en attente de push) |
+| 6 — Modules système D-Bus | 🚧 En cours (wifi/bluetooth/app-dock/systray/exec faits, hors lockscreen) |
 
 ---
 
