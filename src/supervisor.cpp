@@ -98,7 +98,31 @@ ModuleSupervisor::~ModuleSupervisor() { shutdown(); }
 
 std::string ModuleSupervisor::producer_path() {
     const char* env = getenv("OTAKU_MOD_PATH");
-    return (env && *env) ? std::string(env) : std::string("otakud-mod");
+    if (env && *env) return std::string(env);
+
+    auto exists = [](const std::string& p) {
+        return access(p.c_str(), X_OK) == 0;
+    };
+
+    // 1) Same directory as the current executable (works for build/otakushell and installed /usr/bin)
+    char exe_path[4096] = {0};
+    ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (n > 0) {
+        exe_path[n] = '\0';
+        std::string dir = std::string(exe_path);
+        size_t slash = dir.find_last_of('/');
+        if (slash != std::string::npos) {
+            std::string cand = dir.substr(0, slash + 1) + "otakud-mod";
+            if (exists(cand)) return cand;
+        }
+    }
+
+    // 2) Common dev locations relative to CWD (when running ./build/otakushell from repo root)
+    const char* candidates[] = {"./build/otakud-mod", "./otakud-mod", "build/otakud-mod"};
+    for (const char* c : candidates) if (exists(c)) return std::string(c);
+
+    // 3) Fallback to PATH
+    return std::string("otakud-mod");
 }
 
 bool ModuleSupervisor::spawn(Producer& p) {
